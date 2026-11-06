@@ -4,6 +4,10 @@ import math
 import base64
 import binascii
 import threading
+import json
+import uuid
+from datetime import datetime, timezone
+from typing import Literal
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +43,14 @@ class PredictRequest(BaseModel):
 class FrameRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     image: str
+
+
+class DatasetRequest(FrameRequest):
+    label: Literal["normal", "suspicious", "cheating"]
+    session_id: str
+    details: str = ""
+    captured_at: str
+    consent: Literal[True]
 
 
 _extract_lock = threading.Lock()
@@ -138,6 +150,25 @@ def validate_features(features: dict[str, Any]) -> tuple[pd.DataFrame, int]:
     if supplied < 10:
         raise HTTPException(status_code=422, detail="At least 10 populated feature values are required. Provide extracted frame features, not an empty template.")
     return pd.DataFrame([values], columns=FEATURE_COLS), len(FEATURE_COLS) - supplied
+
+
+@app.post("/api/dataset")
+def save_dataset_sample(request: DatasetRequest) -> dict[str, str]:
+    session_id = request.session_id.strip()
+    if not session_id or len(session_id) > 100 or len(request.details) > 500 or len(request.captured_at) > 50:
+        raise HTTPException(status_code=422, detail="Provide a session ID (1–100 characters) and details under 500 characters.")
+    extracted = extract_frame(FrameRequest(image=request.image))
+    validate_features(extracted["features"])
+    sample_id = uuid.uuid4().hex
+    directory = ROOT / "dataset" / "samples"
+    directory.mkdir(parents=True, exist_ok=True)
+    sample = {"id": sample_id, "session_id": session_id, "label": request.label,
+              "details": request.details.strip(), "captured_at": request.captured_at,
+              "saved_at": datetime.now(timezone.utc).isoformat(), "image": request.image,
+              "features": extracted["features"], "extraction_note": extracted["note"]}
+    with (directory / f"{sample_id}.json").open("x", encoding="utf-8") as output:
+        json.dump(sample, output, ensure_ascii=False, allow_nan=False)
+    return {"id": sample_id, "message": "Saved locally for later review and training."}
 
 
 @app.get("/api/health")
