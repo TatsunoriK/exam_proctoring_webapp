@@ -140,7 +140,7 @@ npm run dev
 
 ### GitHub Pages และ backend บนเครื่อง
 
-GitHub Pages เผยแพร่เฉพาะ frontend ส่วน backend ต้องเปิดบนเครื่องของผู้ใช้แต่ละคนที่ `127.0.0.1:8000` และตั้งค่า `.env` ให้เชื่อม MongoDB ก่อน เว็บของคนอื่นไม่สามารถใช้ backend ที่เปิดบนเครื่องของเราได้โดยอัตโนมัติ
+GitHub Pages เป็นจุดเข้าที่พาเบราว์เซอร์ไปยัง ExamFlow ที่ backend บนเครื่องเดียวกันที่ `127.0.0.1:8000` เพื่อให้ระบบ login ใช้ cookies กับ backend ได้ เครื่องแต่ละเครื่องจึงต้องเปิด backend และ build frontend ในเครื่อง พร้อมตั้งค่า `.env` ให้เชื่อม MongoDB ก่อน เว็บของคนอื่นไม่สามารถใช้ backend ที่เปิดบนเครื่องของเราได้โดยอัตโนมัติ
 
 1. นำการเปลี่ยนแปลงขึ้น GitHub โดยไม่เพิ่ม `.env` หรือไฟล์ภาพ แล้วเปิด repository → **Settings → Pages → Build and deployment → Source → GitHub Actions**
 2. workflow `.github/workflows/pages.yml` จะ build และ deploy เมื่อ push ไปยัง `main` ตรวจสถานะได้จากแท็บ **Actions** เมื่อสำเร็จเปิด URL ที่ GitHub Pages แสดง (สำหรับ repository นี้คาดว่าเป็น `https://tatsunorik.github.io/exam_proctoring_webapp/`)
