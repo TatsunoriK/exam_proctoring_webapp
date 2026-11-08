@@ -21,6 +21,8 @@ from pydantic import BaseModel, ConfigDict
 from pymongo.errors import PyMongoError
 
 from .database import samples_collection
+from .clip_analysis import router as clip_analysis_router
+from .examflow_api import router as examflow_router
 
 ROOT = Path(__file__).resolve().parents[2]
 MODEL_PATH = ROOT / "model" / "exam_proctoring_model.joblib"
@@ -36,6 +38,8 @@ LABELS: list[str] = bundle["labels"]
 
 app = FastAPI(title="Exam Proctoring Model API", version="1.0.0",
               description="Predicts a class from the model's 67 numeric frame features.")
+app.include_router(clip_analysis_router)
+app.include_router(examflow_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://tatsunorik.github.io"],

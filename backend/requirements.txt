@@ -9,3 +9,4 @@ ultralytics
 opencv-python
 pymongo[srv]>=4.6,<5
 python-dotenv>=1,<2
+av>=14,<17

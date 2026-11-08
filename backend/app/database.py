@@ -9,9 +9,13 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 
 @lru_cache(maxsize=1)
-def samples_collection():
+def database():
     uri = os.getenv("MONGODB_URI")
     if not uri:
         raise RuntimeError("MONGODB_URI is not configured. See README for setup.")
     client = MongoClient(uri, serverSelectionTimeoutMS=5000)
-    return client[os.getenv("MONGODB_DATABASE", "exam_proctoring")]["samples"]
+    return client[os.getenv("MONGODB_DATABASE", "exam_proctoring")]
+
+
+def samples_collection():
+    return database()["samples"]
