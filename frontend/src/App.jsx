@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import WebcamCapture from "./WebcamCapture";
+import { apiUrl } from "./api";
 import { Activity, ArrowUpRight, BadgeCheck, Braces, Check, ChevronRight, CircleAlert, CloudUpload, FileJson2, Gauge, LoaderCircle, RotateCcw, ShieldCheck, Sparkles, TriangleAlert, X } from "lucide-react";
 
 const labelText = { normal: "ปกติ", suspicious: "น่าสงสัย", cheating: "มีความเสี่ยงสูง" };
@@ -15,7 +16,7 @@ export default function App() {
   const fileRef = useRef(null);
 
   useEffect(() => {
-    Promise.all([fetch("/api/schema").then(r => { if (!r.ok) throw new Error("API unavailable"); return r.json(); }), fetch("/api/health").then(r => r.json())])
+    Promise.all([fetch(apiUrl("/api/schema")).then(r => { if (!r.ok) throw new Error("API unavailable"); return r.json(); }), fetch(apiUrl("/api/health")).then(r => r.json())])
       .then(([s]) => { setSchema(s); setApiStatus("online"); })
       .catch(() => setApiStatus("offline"));
   }, []);
@@ -48,13 +49,13 @@ export default function App() {
     setLoading(true);
     try {
       if (typeof body.image === "string") {
-        const extracted = await fetch("/api/extract-frame", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ image: body.image }) });
+        const extracted = await fetch(apiUrl("/api/extract-frame"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ image: body.image }) });
         const extractedData = await extracted.json();
         if (!extracted.ok) throw new Error(extractedData.detail || "สกัด feature จากภาพไม่สำเร็จ");
         body = { features: extractedData.features };
         setJsonText(JSON.stringify(body, null, 2));
       } else if (!body.features) body = { features: body };
-      const response = await fetch("/api/predict", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const response = await fetch(apiUrl("/api/predict"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || "ทำนายไม่สำเร็จ");
       setResult(data);

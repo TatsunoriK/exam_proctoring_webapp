@@ -1,12 +1,49 @@
-﻿# Exam Vision — React + Tailwind + FastAPI
+# Exam Vision — React + Tailwind + FastAPI
 
 เว็บตัวอย่างสำหรับจับภาพจากเว็บแคม สกัด feature ด้วย MediaPipe และ YOLOv8s แล้วส่ง feature ให้โมเดล Random Forest จำแนกเฟรมเป็น `normal`, `suspicious` หรือ `cheating` ผู้ใช้สามารถนำเข้า feature JSON เองได้เช่นกัน
 
 - `frontend/` — React, Vite และ Tailwind สำหรับเปิดกล้องและแสดงผล
 - `backend/` — FastAPI สำหรับสกัด feature และทำนายผล
 - `model/` — โมเดล Random Forest และไฟล์โมเดลที่ใช้สกัด feature
+- MongoDB Atlas — เก็บตัวอย่างภาพและ feature ในฐานข้อมูลที่แชร์กับทีมได้
 
-## ติดตั้งและเริ่มใช้งานบน Windows
+## ตั้งค่า MongoDB Atlas
+
+หากมี cluster สำหรับทีมอยู่แล้ว ให้ข้ามขั้นตอนสร้าง cluster และขอสิทธิ์เข้าถึงกับผู้ดูแล โดยแต่ละเครื่องต้องตั้งค่าการเชื่อมต่อของตนเอง
+
+1. เข้าสู่ [MongoDB Atlas](https://www.mongodb.com/atlas/database) สร้าง Project และ Free cluster จากนั้นสร้าง **database user** และเพิ่ม IP ของเครื่องที่รัน backend ใน **Database & Network Access**
+2. ที่ cluster เลือก **Connect → Drivers** แล้วคัดลอก connection string
+3. สร้างไฟล์ `.env` ในโฟลเดอร์หลักของโปรเจกต์ (ตำแหน่งเดียวกับ README นี้) โดยคัดลอกจาก `.env.example` เช่นใน Command Prompt:
+
+   ```bat
+   copy .env.example .env
+   ```
+
+4. เปิด `.env` แล้วใส่ connection string จริง แทน username, password และชื่อ cluster ในตัวอย่าง โดยใช้ชื่อฐานข้อมูลเดียวกันหากต้องการแชร์ข้อมูล:
+
+   ```dotenv
+   MONGODB_URI=mongodb+srv://USERNAME:PASSWORD@CLUSTER.mongodb.net/?retryWrites=true&w=majority
+   MONGODB_DATABASE=exam_proctoring
+   ```
+
+   หาก username หรือ password มีอักขระพิเศษ ให้ URL-encode ก่อนใส่ใน URI ไฟล์ `.env` ถูกตั้งค่าให้ Git ข้ามไว้แล้ว ห้ามนำรหัสผ่านหรือ URI จริงใส่ใน README หรือส่งผ่านช่องทางสาธารณะ
+
+### ดูข้อมูลใน Atlas
+
+เข้าโปรเจกต์ → **Data Explorer** → ฐานข้อมูล `exam_proctoring` → collection `samples` ชื่อฐานข้อมูลอาจต่างออกไปตามค่า `MONGODB_DATABASE` แต่ละ document คือหนึ่งตัวอย่าง มี `id`, `session_id`, `label`, `details`, `captured_at`, `saved_at`, `image`, `features` และ `extraction_note` สามารถใช้ MongoDB Compass เชื่อมต่อเพื่อดูข้อมูลได้เช่นกัน ฐานข้อมูลและ collection จะปรากฏหลังบันทึกหรือนำเข้าข้อมูลครั้งแรก
+
+### นำเข้าข้อมูล JSON เดิม (ถ้ามี)
+
+หลังติดตั้ง backend ตามขั้นตอนด้านล่าง ให้วางไฟล์เดิมใน `dataset/samples/` แล้วเปิด Command Prompt จากโฟลเดอร์หลักของโปรเจกต์:
+
+```bat
+cd backend
+.venv\Scripts\python migrate_dataset.py
+```
+
+ตรวจผล `Imported` (เพิ่มใหม่), `already present` (มีอยู่แล้ว) และ `failed` (นำเข้าไม่สำเร็จ) แล้วตรวจข้อมูลใน Atlas สคริปต์รันซ้ำได้และเก็บไฟล์ต้นฉบับไว้ ข้อมูลใน Docker volume เดิมแยกจากโฟลเดอร์นี้ ต้อง export มาที่ `dataset/samples/` ก่อนหากต้องการนำเข้า
+
+## วิธีรันบน Windows
 
 ต้องมี Python 3.13, Node.js 20 หรือใหม่กว่า และอินเทอร์เน็ตสำหรับติดตั้งแพ็กเกจและดาวน์โหลดไฟล์โมเดล เปิด Command Prompt ที่โฟลเดอร์โปรเจกต์
 
@@ -22,6 +59,8 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 สคริปต์ดาวน์โหลด `face_landmarker.task`, `hand_landmarker.task` และ `yolov8s.pt` ลงใน `model/` ส่วน `exam_proctoring_model.joblib` ต้องมีอยู่ในโฟลเดอร์เดียวกันอยู่แล้ว ปล่อยหน้าต่าง backend เปิดไว้ระหว่างใช้งาน
+
+ตั้งค่า MongoDB ตามขั้นตอนข้างต้นก่อนกดบันทึกชุดข้อมูล หากเชื่อมต่อไม่ได้ให้ตรวจ `.env`, database user และ IP access list แล้วเริ่ม backend ใหม่หลังแก้ไข `.env`
 
 - API: http://127.0.0.1:8000
 - เอกสาร API: http://127.0.0.1:8000/docs
@@ -51,13 +90,7 @@ npm run dev
 
 ### เก็บภาพเพื่อสร้างชุดข้อมูล
 
-หลังจับภาพ ให้ตรวจภาพ เลือก label ระบุรหัสรอบบันทึกและรายละเอียด (ถ้ามี) ยืนยันว่าได้รับความยินยอม แล้วกด **บันทึกลงชุดข้อมูล** ระบบบันทึกภาพและ feature ที่สกัดใหม่เป็นไฟล์ JSON ใน `dataset/samples/` บนเครื่อง backend ใช้รหัสรอบเดียวกันกับภาพที่มาจากรอบเดียวกัน เพื่อช่วยแยกชุดฝึกและทดสอบภายหลัง ไฟล์เหล่านี้มีข้อมูลภาพส่วนบุคคล ควรควบคุมการเข้าถึงและลบเมื่อไม่ต้องการใช้
-
-ตำแหน่งบนเครื่องนี้คือ `C:\Users\tatsu\OneDrive\Desktop\exam_proctoring_webapp\dataset\samples\` โฟลเดอร์จะถูกสร้างเมื่อบันทึกตัวอย่างแรก แต่ละไฟล์มีชื่อเป็นรหัสตัวอย่างและเก็บภาพ JPEG แบบ data URL, feature, label, รหัสรอบบันทึก, รายละเอียด และเวลาบันทึก สามารถเปิดโฟลเดอร์จาก Command Prompt ที่อยู่ในโฟลเดอร์โปรเจกต์ด้วยคำสั่ง:
-
-```bat
-explorer dataset\samples
-```
+หลังจับภาพ เลือก label ระบุรหัสรอบและรายละเอียด ยืนยันความยินยอม แล้วกด **บันทึกลงชุดข้อมูล** ระบบบันทึกภาพและ feature ใน MongoDB collection `samples` ข้อมูลมีภาพส่วนบุคคล ควรกำหนดสิทธิ์การเข้าถึงและลบเมื่อไม่ต้องการใช้
 
 รหัสรอบเป็นข้อมูลที่ผู้ใช้กรอก ควรหลีกเลี่ยงการใส่ชื่อหรือข้อมูลระบุตัวบุคคลโดยตรง
 
@@ -65,21 +98,27 @@ explorer dataset\samples
 
 ## API
 
-- `GET /api/health` — ตรวจสถานะ backend และโมเดล Random Forest
+- `GET /api/health` — ตรวจสถานะ backend และโมเดล Random Forest (ไม่ได้ตรวจการเชื่อมต่อ MongoDB)
 - `GET /api/schema` — ดูชื่อ feature และคลาสที่โมเดลรองรับ
 - `POST /api/extract-frame` — รับ JSON รูปแบบ `{"image": "data:image/jpeg;base64,..."}` และส่งคืน `features`, `objects` และหมายเหตุ เฟรมต้องมีขนาดไม่เกิน 12 ล้านพิกเซลและ data URL ไม่เกิน 4 ล้านตัวอักษร
 - `POST /api/predict` — รับ JSON รูปแบบ `{"features": {...}}` และส่งคืนผลจำแนกกับความน่าจะเป็น
-- `POST /api/dataset` — บันทึกภาพและ feature ลงเครื่องเมื่อส่ง label, รหัสรอบบันทึก และการยืนยันความยินยอม
+- `POST /api/dataset` — บันทึกภาพและ feature ลง MongoDB เมื่อส่ง label, รหัสรอบบันทึก และการยืนยันความยินยอม
 
 สำหรับ `/api/predict` ต้องส่งชื่อ feature ให้ครบตาม schema ทั้ง 67 ฟิลด์ ใช้ `null` สำหรับค่าที่ไม่มีได้ แต่ต้องมีค่าตัวเลขหรือ boolean อย่างน้อย 10 ค่า โมเดลจะแทน `null` ด้วย median จากชุดฝึก
 
 ## ข้อจำกัด
 
-### เตรียมรันด้วย Docker บน server
+### GitHub Pages และ backend บนเครื่อง
 
-ไฟล์ `Dockerfile` build หน้าเว็บและรวม FastAPI กับไฟล์โมเดล ส่วน `compose.yaml` เก็บ dataset ใน Docker volume และเปิดพอร์ตเฉพาะ localhost ของ server รันจากโฟลเดอร์โปรเจกต์ด้วย `docker compose up -d --build` แล้วเปิด `http://127.0.0.1:8001` หรือเช็ก `http://127.0.0.1:8001/api/health` บน server ใช้ `docker compose logs -f` ดู log ภาพที่เก็บจะอยู่ใน volume `dataset` ของ Compose ไม่ใช่โฟลเดอร์ dataset บนเครื่องผู้ใช้
+GitHub Pages เผยแพร่เฉพาะ frontend ส่วน backend ต้องเปิดบนเครื่องของผู้ใช้แต่ละคนที่ `127.0.0.1:8000` และตั้งค่า `.env` ให้เชื่อม MongoDB ก่อน เว็บของคนอื่นไม่สามารถใช้ backend ที่เปิดบนเครื่องของเราได้โดยอัตโนมัติ
 
-การเปิดให้คนอื่นใช้ยังต้องมี server และ reverse proxy ที่ตั้งค่าโดเมนและ HTTPS รวมถึงระบบยืนยันตัวตนและควบคุมสิทธิ์สำหรับข้อมูลภาพ แอปปัจจุบันยังไม่มีระบบเหล่านี้ จึงไม่ควรเปิดพอร์ตแอปสู่สาธารณะโดยตรง Docker ไม่ได้เผยแพร่เว็บไซต์ให้อัตโนมัติ
+1. นำการเปลี่ยนแปลงขึ้น GitHub โดยไม่เพิ่ม `.env` หรือไฟล์ภาพ แล้วเปิด repository → **Settings → Pages → Build and deployment → Source → GitHub Actions**
+2. workflow `.github/workflows/pages.yml` จะ build และ deploy เมื่อ push ไปยัง `main` ตรวจสถานะได้จากแท็บ **Actions** เมื่อสำเร็จเปิด URL ที่ GitHub Pages แสดง (สำหรับ repository นี้คาดว่าเป็น `https://tatsunorik.github.io/exam_proctoring_webapp/`)
+3. บนเครื่องที่เปิดเว็บ ให้ติดตั้งและเริ่ม backend ตามขั้นตอน Windows ด้านบน แล้วเข้า URL ของ GitHub Pages หากเบราว์เซอร์ขออนุญาตเข้าถึงเครือข่ายภายในหรือ localhost ให้เลือกอนุญาต
+
+ค่าที่ตั้งไว้สำหรับ repository นี้คือ frontend origin `https://tatsunorik.github.io` และ base path `/exam_proctoring_webapp/` หากย้าย repository หรือใช้โดเมนอื่น ต้องแก้ origin ที่อนุญาตใน backend และ base path ใน workflow การเชื่อมต่อจาก HTTPS ไป localhost อาจขึ้นอยู่กับการอนุญาตและเวอร์ชันของเบราว์เซอร์
+
+การเปิดให้คนอื่นใช้ต้องมี server, HTTPS และระบบยืนยันตัวตนและควบคุมสิทธิ์ แอปปัจจุบันยังไม่มีระบบเหล่านี้ จึงไม่ควรเปิดให้สาธารณะเข้าถึงโดยตรง
 
 - การจับภาพเป็นแบบทีละเฟรม ไม่ใช่การติดตามต่อเนื่อง ค่า flag การหันหน้าและสายตาใช้ค่ากลางจากชุดข้อมูลที่ให้มา ส่วน flag การพูดใช้ `null` เพราะต้องอาศัยหลายเฟรม วิธีนี้ต่างจาก baseline และหน้าต่างเวลาของ notebook
 - โหมด YOLO COCO ตาม notebook ตรวจได้เฉพาะคลาสที่โมเดลรองรับ จึงไม่ครอบคลุมวัตถุทุกประเภทใน schema

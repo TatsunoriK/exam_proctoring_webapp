@@ -4,7 +4,6 @@ import math
 import base64
 import binascii
 import threading
-import json
 import uuid
 from datetime import datetime, timezone
 from typing import Literal
@@ -15,9 +14,13 @@ import joblib
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
+from pymongo.errors import PyMongoError
+
+from .database import samples_collection
 
 ROOT = Path(__file__).resolve().parents[2]
 MODEL_PATH = ROOT / "model" / "exam_proctoring_model.joblib"
@@ -33,6 +36,12 @@ LABELS: list[str] = bundle["labels"]
 
 app = FastAPI(title="Exam Proctoring Model API", version="1.0.0",
               description="Predicts a class from the model's 67 numeric frame features.")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://tatsunorik.github.io"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
+)
 
 
 class PredictRequest(BaseModel):
@@ -160,15 +169,15 @@ def save_dataset_sample(request: DatasetRequest) -> dict[str, str]:
     extracted = extract_frame(FrameRequest(image=request.image))
     validate_features(extracted["features"])
     sample_id = uuid.uuid4().hex
-    directory = ROOT / "dataset" / "samples"
-    directory.mkdir(parents=True, exist_ok=True)
-    sample = {"id": sample_id, "session_id": session_id, "label": request.label,
+    sample = {"_id": sample_id, "id": sample_id, "session_id": session_id, "label": request.label,
               "details": request.details.strip(), "captured_at": request.captured_at,
               "saved_at": datetime.now(timezone.utc).isoformat(), "image": request.image,
               "features": extracted["features"], "extraction_note": extracted["note"]}
-    with (directory / f"{sample_id}.json").open("x", encoding="utf-8") as output:
-        json.dump(sample, output, ensure_ascii=False, allow_nan=False)
-    return {"id": sample_id, "message": "Saved locally for later review and training."}
+    try:
+        samples_collection().insert_one(sample)
+    except (PyMongoError, RuntimeError) as exc:
+        raise HTTPException(status_code=503, detail="MongoDB is unavailable or not configured. Check server logs and database settings.") from exc
+    return {"id": sample_id, "message": "Saved to MongoDB for later review and training."}
 
 
 @app.get("/api/health")

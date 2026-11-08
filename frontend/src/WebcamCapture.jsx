@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { apiUrl } from "./api";
 
 export default function WebcamCapture({ onExtract }) {
   const video = useRef(null);
@@ -72,7 +73,7 @@ export default function WebcamCapture({ onExtract }) {
     setError("");
     setExtracting(true);
     try {
-      const response = await fetch("/api/extract-frame", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ image: captured.image }) });
+      const response = await fetch(apiUrl("/api/extract-frame"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ image: captured.image }) });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || "สกัด feature ไม่สำเร็จ");
       onExtract(data.features, captured);
@@ -93,7 +94,7 @@ export default function WebcamCapture({ onExtract }) {
     if (!frame || !label || !sessionId.trim() || !consent) return;
     setSaving(true); setError(""); setSaved("");
     try {
-      const response = await fetch("/api/dataset", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ image: frame.image, captured_at: frame.captured_at, label, session_id: sessionId.trim(), details, consent }) });
+      const response = await fetch(apiUrl("/api/dataset"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ image: frame.image, captured_at: frame.captured_at, label, session_id: sessionId.trim(), details, consent }) });
       const data = await response.json();
       if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "บันทึกไม่สำเร็จ");
       setSaved(`บันทึกแล้ว รหัส ${data.id}`);
@@ -112,7 +113,7 @@ export default function WebcamCapture({ onExtract }) {
     {frame && <p className="mt-3 text-xs text-slate-600">จับภาพแล้ว {frame.width} × {frame.height} พิกเซล เวลา {new Date(frame.captured_at).toLocaleString()}</p>}
     {frame && <div className="mt-5 max-w-xl rounded-2xl border border-slate-200 p-4">
       <h3 className="font-bold">เพิ่มภาพลงชุดข้อมูล</h3>
-      <p className="mt-1 text-xs text-slate-500">ตรวจภาพและเลือก label ด้วยตนเอง ระบบจะบันทึกภาพและ feature ในเครื่องเพื่อใช้ฝึกภายหลัง</p>
+      <p className="mt-1 text-xs text-slate-500">ตรวจภาพและเลือก label ด้วยตนเอง ระบบจะบันทึกภาพและ feature ใน MongoDB เพื่อใช้ฝึกภายหลัง</p>
       <img src={frame.image} alt="ภาพที่จับสำหรับตรวจสอบก่อนบันทึก" className="mt-3 max-h-48 rounded-xl" />
       <label className="mt-3 block text-sm">Label <select value={label} onChange={e => setLabel(e.target.value)} className="ml-2 rounded border border-slate-300 p-2"><option value="">เลือก label</option><option value="normal">ปกติ</option><option value="suspicious">น่าสงสัย</option><option value="cheating">มีความเสี่ยงสูง</option></select></label>
       <label className="mt-3 block text-sm">รหัสรอบบันทึก <input value={sessionId} onChange={e => setSessionId(e.target.value)} maxLength={100} placeholder="เช่น session-01" className="ml-2 rounded border border-slate-300 p-2" /></label>

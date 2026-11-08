@@ -7,3 +7,5 @@ scikit-learn==1.9.1
 mediapipe
 ultralytics
 opencv-python
+pymongo[srv]>=4.6,<5
+python-dotenv>=1,<2
