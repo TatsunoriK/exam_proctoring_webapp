@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict
 from pymongo.errors import PyMongoError
 
 from .database import samples_collection
-from .clip_analysis import router as clip_analysis_router
+from .clip_analysis import router as clip_analysis_router, frame_observations
 from .examflow_api import router as examflow_router
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -126,7 +126,7 @@ def extract_frame(request: FrameRequest) -> dict[str, Any]:
             value = float(value)
             value = value if math.isfinite(value) else None
         features[name] = value
-    return {"features": features, "objects": record["objects_json"], "note": "Single-frame estimate: dataset-wide medians used for pose flags; talking requires a temporal window."}
+    return {"features": features, "observations": frame_observations(record), "objects": record["objects_json"], "note": "Single-frame estimate: dataset-wide medians used for pose flags; talking requires a temporal window."}
 
 
 def validate_features(features: dict[str, Any]) -> tuple[pd.DataFrame, int]:

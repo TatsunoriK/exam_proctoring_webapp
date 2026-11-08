@@ -21,6 +21,21 @@ MAX_SECONDS = 30
 MAX_SOURCE_FRAMES = 1800
 
 
+# Observed frame signals, not feature attribution for the classifier's decision.
+OBSERVATION_FLAGS = {
+    "flag_multi_person": "multiple_people", "flag_no_face": "no_face",
+    "flag_look_away_strong": "head_turned_strong", "flag_look_away": "head_turned",
+    "flag_head_pitch": "head_tilted", "flag_gaze_away": "gaze_away",
+    "flag_hand_mouth": "hand_near_mouth", "flag_hand_face": "hand_near_face",
+    **{f"flag_{name}": f"object_{name}" for name in
+       ("phone", "tablet", "book", "paper", "earphone", "watch", "laptop", "tv", "remote")},
+}
+
+
+def frame_observations(record: dict) -> list[str]:
+    return [code for flag, code in OBSERVATION_FLAGS.items() if record.get(flag) == 1]
+
+
 def analyze_video(data: bytes, suffix: str) -> dict:
     import av
     import cv2
@@ -62,7 +77,8 @@ def analyze_video(data: bytes, suffix: str) -> dict:
                 label = result["prediction"]
                 if label in ("suspicious", "cheating"):
                     flags.append({"time_s": round(timestamp, 2), "label": label,
-                                  "confidence": result["probabilities"][label]})
+                                  "confidence": result["probabilities"][label],
+                                  "observations": extracted.get("observations", [])})
     except (av.FFmpegError, IndexError, OSError, ValueError) as exc:
         raise HTTPException(status_code=422, detail="Video cannot be decoded") from exc
     if not analyzed:
