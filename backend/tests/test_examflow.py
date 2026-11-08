@@ -2,12 +2,46 @@ import unittest
 from unittest.mock import patch
 
 import mongomock
+from bson import ObjectId
+from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from app.main import app
 
 
 class ExamFlowTest(unittest.TestCase):
+    def test_screen_clip_is_stored_and_only_exam_owner_can_view(self):
+        db = mongomock.MongoClient().exam_test
+        teacher, student, other = TestClient(app), TestClient(app), TestClient(app)
+        stored = {}
+        class FakeBucket:
+            def __init__(self, *args, **kwargs): pass
+            def upload_from_stream(self, name, data, metadata):
+                file_id = ObjectId()
+                stored[file_id] = (data, metadata)
+                return file_id
+            def open_download_stream(self, file_id):
+                data, metadata = stored[file_id]
+                return SimpleNamespace(read=lambda: data, metadata=metadata)
+            def delete(self, file_id): stored.pop(file_id, None)
+        with patch("app.examflow_api.database", return_value=db), patch("app.examflow_api.GridFSBucket", FakeBucket):
+            for client, name, role in [(teacher, "teacher", "teacher"), (student, "student", "student"), (other, "other", "teacher")]:
+                response = client.post("/api/auth/register", json={"name": name + " user", "email": name + "@example.test", "password": "password123", "role": role})
+                self.assertEqual(response.status_code, 200)
+            exam = teacher.post("/api/exams", json={"title": "Test", "minutes": 10, "questions": [{"text": "Question", "options": ["A", "B", "C", "D"], "correct": 0}]}).json()
+            attempt_id = student.post("/api/start", json={"exam": exam["id"], "name": "Student", "cameraConsent": True}).json()["id"]
+            base = "/api/attempt/" + attempt_id
+            self.assertEqual(student.post(base + "/record", content=b"screen segment", headers={"content-type": "video/webm"}).status_code, 200)
+            self.assertEqual(student.post(base + "/submit", json={}).status_code, 200)
+            self.assertEqual(student.post(base + "/record", content=b"last segment", headers={"content-type": "video/webm"}).status_code, 200)
+            records = teacher.get("/api/results/" + exam["id"]).json()[0]["recordings"]
+            self.assertEqual(len(records), 2)
+            path = "/api/video/" + attempt_id + "/0"
+            self.assertEqual(other.get(path).status_code, 403)
+            response = teacher.get(path)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.content, b"screen segment")
+
     def test_exam_and_flagged_clip_flow(self):
         db = mongomock.MongoClient().exam_test
         teacher = TestClient(app)

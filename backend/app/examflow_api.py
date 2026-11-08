@@ -16,6 +16,7 @@ from bson import ObjectId
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
 from gridfs import GridFSBucket
+from pymongo.errors import PyMongoError
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
@@ -207,9 +208,25 @@ def student_attempt(request: Request, attempt_id: str, allow_recent_submission: 
     return db, attempt, db.exam_exams.find_one({"_id": attempt["exam"]})
 
 
+def store_screen_clip(db, attempt_id: str, data: bytes, content_type: str) -> str:
+    bucket = GridFSBucket(db, bucket_name="screen_clips")
+    file_id = bucket.upload_from_stream("screen-clip", data, metadata={"attempt_id": attempt_id, "content_type": content_type, "created_at": now_ms()})
+    try:
+        result = db.exam_attempts.update_one({"_id": attempt_id}, {"$push": {"recordings": str(file_id)}})
+        if result.matched_count != 1:
+            raise RuntimeError("Attempt no longer exists")
+    except Exception:
+        bucket.delete(file_id)
+        raise
+    return str(file_id)
+
+
 @router.post("/attempt/{attempt_id}/{action}")
 async def attempt_action(attempt_id: str, action: str, request: Request):
-    db, attempt, exam = student_attempt(request, attempt_id, allow_recent_submission=action in ("camera", "camera-failure"))
+    db, attempt, exam = student_attempt(request, attempt_id, allow_recent_submission=action in ("camera", "camera-failure", "record", "record-failure"))
+    if action == "record-failure":
+        db.exam_attempts.update_one({"_id": attempt_id}, {"$push": {"events": {"type": "อัปโหลดคลิปหน้าจอไม่สำเร็จ", "time": now_ms()}}})
+        return {"ok": True}
     if action == "camera-failure":
         db.exam_attempts.update_one({"_id": attempt_id}, {"$push": {"proctoringEvents": {"status": "analysis_failed", "reviewFlags": [], "segment": -1}}})
         return {"ok": True}
@@ -227,6 +244,11 @@ async def attempt_action(attempt_id: str, action: str, request: Request):
         if not data:
             fail("คลิปว่าง")
         if action == "record":
+            try:
+                await run_in_threadpool(store_screen_clip, db, attempt_id, bytes(data), content_type)
+            except (PyMongoError, RuntimeError) as exc:
+                logger.exception("Screen clip storage failed for attempt %s", attempt_id)
+                raise HTTPException(status_code=503, detail="บันทึกคลิปหน้าจอไม่สำเร็จ") from exc
             return {"ok": True}
         if not clip_capacity.acquire(blocking=False):
             fail("คิววิเคราะห์เต็ม กรุณาลองส่งคลิปใหม่", 503)
@@ -268,7 +290,21 @@ def results(exam_id: str, request: Request):
     db = database()
     if not db.exam_exams.find_one({"_id": exam_id, "owner": user["_id"]}):
         fail("ไม่มีสิทธิ์", 403)
-    return [{"id": a["_id"], "name": a["name"], "deviceMode": a.get("deviceMode", "pc"), "started": a["started"], "submitted": a["submitted"], "score": a.get("score"), "events": a["events"], "recordings": [], "cameraRecordings": a["cameraRecordings"], "proctoringEvents": a["proctoringEvents"], "reviews": a.get("reviews", {})} for a in db.exam_attempts.find({"exam": exam_id}).sort("started", -1)]
+    return [{"id": a["_id"], "name": a["name"], "deviceMode": a.get("deviceMode", "pc"), "started": a["started"], "submitted": a["submitted"], "score": a.get("score"), "events": a["events"], "recordings": a.get("recordings", []), "cameraRecordings": a["cameraRecordings"], "proctoringEvents": a["proctoringEvents"], "reviews": a.get("reviews", {})} for a in db.exam_attempts.find({"exam": exam_id}).sort("started", -1)]
+
+
+@router.get("/video/{attempt_id}/{index}")
+def screen_video(attempt_id: str, index: int, request: Request):
+    user = current(request, "teacher")
+    db = database()
+    attempt = db.exam_attempts.find_one({"_id": attempt_id})
+    if not attempt or not db.exam_exams.find_one({"_id": attempt["exam"], "owner": user["_id"]}):
+        fail("ไม่มีสิทธิ์", 403)
+    recordings = attempt.get("recordings", [])
+    if index < 0 or index >= len(recordings):
+        fail("ไม่พบคลิป", 404)
+    obj = GridFSBucket(db, bucket_name="screen_clips").open_download_stream(ObjectId(recordings[index]))
+    return Response(obj.read(), media_type=obj.metadata.get("content_type", "video/webm"), headers={"Cache-Control": "private, no-store"})
 
 
 @router.post("/review/{attempt_id}/{clip_id}")

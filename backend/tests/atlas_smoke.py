@@ -27,6 +27,8 @@ def main():
         response = student.post("/api/start", json={"exam": exam_id, "name": "Test", "cameraConsent": True})
         response.raise_for_status()
         attempt_id = response.json()["id"]
+        response = student.post(f"/api/attempt/{attempt_id}/record", content=b"synthetic-screen-test", headers={"content-type": "video/webm"})
+        response.raise_for_status()
         fake_result = {"status": "analyzed", "review_flags": [{"time_s": 0, "label": "suspicious", "confidence": 0.8}], "frames_analyzed": 1, "model_version": "test"}
         with patch("app.examflow_api.analyze_video", return_value=fake_result), patch("app.examflow_api.clip_executor.submit", side_effect=lambda fn, *args: fn(*args)):
             response = student.post(f"/api/attempt/{attempt_id}/camera", content=b"synthetic-test-data", headers={"content-type": "video/webm"})
@@ -37,13 +39,18 @@ def main():
         response = teacher.get(f"/api/camera/{attempt_id}/0")
         response.raise_for_status()
         assert response.content == b"synthetic-test-data"
-        print("Atlas accounts, exam, attempt, flagged clip write and authorized read: OK")
+        response = teacher.get(f"/api/video/{attempt_id}/0")
+        response.raise_for_status()
+        assert response.content == b"synthetic-screen-test"
+        print("Atlas accounts, exam, attempt, camera and screen clips: OK")
     finally:
         # Use the test's exact identifiers; never remove other users' data.
         if attempt_id:
             attempt = db.exam_attempts.find_one({"_id": attempt_id})
             for file_id in (attempt or {}).get("cameraRecordings", []):
                 GridFSBucket(db, bucket_name="review_clips").delete(ObjectId(file_id))
+            for file_id in (attempt or {}).get("recordings", []):
+                GridFSBucket(db, bucket_name="screen_clips").delete(ObjectId(file_id))
             db.exam_attempts.delete_one({"_id": attempt_id})
         if exam_id:
             db.exam_exams.delete_one({"_id": exam_id})
