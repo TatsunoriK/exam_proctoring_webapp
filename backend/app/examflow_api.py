@@ -208,11 +208,14 @@ def student_attempt(request: Request, attempt_id: str, allow_recent_submission: 
     return db, attempt, db.exam_exams.find_one({"_id": attempt["exam"]})
 
 
-def store_screen_clip(db, attempt_id: str, data: bytes, content_type: str) -> str:
+def store_screen_clip(db, attempt_id: str, data: bytes, content_type: str, timing: dict | None = None) -> str:
     bucket = GridFSBucket(db, bucket_name="screen_clips")
     file_id = bucket.upload_from_stream("screen-clip", data, metadata={"attempt_id": attempt_id, "content_type": content_type, "created_at": now_ms()})
     try:
-        result = db.exam_attempts.update_one({"_id": attempt_id}, {"$push": {"recordings": str(file_id)}})
+        push = {"recordings": str(file_id)}
+        if timing:
+            push["recordingTimings"] = {"id": str(file_id), **timing}
+        result = db.exam_attempts.update_one({"_id": attempt_id}, {"$push": push})
         if result.matched_count != 1:
             raise RuntimeError("Attempt no longer exists")
     except Exception:
@@ -245,7 +248,18 @@ async def attempt_action(attempt_id: str, action: str, request: Request):
             fail("คลิปว่าง")
         if action == "record":
             try:
-                await run_in_threadpool(store_screen_clip, db, attempt_id, bytes(data), content_type)
+                timing = None
+                start_header = request.headers.get("x-clip-start")
+                end_header = request.headers.get("x-clip-end")
+                if start_header and end_header:
+                    try:
+                        start, end = int(start_header), int(end_header)
+                    except ValueError:
+                        fail("Invalid clip timing")
+                    if not 0 < start <= end <= now_ms() + 60000:
+                        fail("Invalid clip timing")
+                    timing = {"start": start, "end": end}
+                await run_in_threadpool(store_screen_clip, db, attempt_id, bytes(data), content_type, timing)
             except (PyMongoError, RuntimeError) as exc:
                 logger.exception("Screen clip storage failed for attempt %s", attempt_id)
                 raise HTTPException(status_code=503, detail="บันทึกคลิปหน้าจอไม่สำเร็จ") from exc
@@ -290,7 +304,7 @@ def results(exam_id: str, request: Request):
     db = database()
     if not db.exam_exams.find_one({"_id": exam_id, "owner": user["_id"]}):
         fail("ไม่มีสิทธิ์", 403)
-    return [{"id": a["_id"], "name": a["name"], "deviceMode": a.get("deviceMode", "pc"), "started": a["started"], "submitted": a["submitted"], "score": a.get("score"), "events": a["events"], "recordings": a.get("recordings", []), "cameraRecordings": a["cameraRecordings"], "proctoringEvents": a["proctoringEvents"], "reviews": a.get("reviews", {})} for a in db.exam_attempts.find({"exam": exam_id}).sort("started", -1)]
+    return [{"id": a["_id"], "name": a["name"], "deviceMode": a.get("deviceMode", "pc"), "started": a["started"], "submitted": a["submitted"], "score": a.get("score"), "events": a["events"], "recordings": a.get("recordings", []), "recordingTimings": a.get("recordingTimings", []), "cameraRecordings": a["cameraRecordings"], "proctoringEvents": a["proctoringEvents"], "reviews": a.get("reviews", {})} for a in db.exam_attempts.find({"exam": exam_id}).sort("started", -1)]
 
 
 @router.get("/video/{attempt_id}/{index}")
@@ -314,11 +328,13 @@ async def review(attempt_id: str, clip_id: str, request: Request):
     attempt = db.exam_attempts.find_one({"_id": attempt_id})
     if not attempt or not db.exam_exams.find_one({"_id": attempt["exam"], "owner": user["_id"]}):
         fail("ไม่มีสิทธิ์", 403)
-    if clip_id not in attempt["cameraRecordings"] or not ObjectId.is_valid(clip_id):
+    is_clip = ObjectId.is_valid(clip_id) and clip_id in attempt.get("cameraRecordings", []) + attempt.get("recordings", [])
+    is_event = re.fullmatch(r"event-[0-9]+", clip_id) and int(clip_id[6:]) < len(attempt.get("events", []))
+    if not (is_clip or is_event):
         fail("ไม่พบคลิป", 404)
     body = await request.json()
     status = body.get("status")
-    if status not in ("pending", "reviewed", "needs_followup"):
+    if status not in ("pending", "normal", "misconduct", "reviewed", "needs_followup"):
         fail("สถานะไม่ถูกต้อง")
     db.exam_attempts.update_one({"_id": attempt_id}, {"$set": {"reviews." + clip_id: {"status": status, "updated": now_ms()}}})
     return {"ok": True, "status": status}
