@@ -10,6 +10,62 @@ from app.main import app
 
 
 class ExamFlowTest(unittest.TestCase):
+    def test_courses_are_private_and_exams_use_owned_course(self):
+        db = mongomock.MongoClient().exam_test
+        teacher, other, student = TestClient(app), TestClient(app), TestClient(app)
+        with patch("app.examflow_api.database", return_value=db):
+            for client, email, role in [(teacher, "teacher@example.test", "teacher"),
+                                        (other, "other@example.test", "teacher"),
+                                        (student, "student@example.test", "student")]:
+                self.assertEqual(client.post("/api/auth/register", json={"name": role, "email": email,
+                                 "password": "password123", "role": role}).status_code, 200)
+            for invalid in ("", " " * 5, "A" * 121, 42):
+                self.assertEqual(teacher.post("/api/courses", json={"name": invalid}).status_code, 400)
+            course = teacher.post("/api/courses", json={"name": "  Mathematics  "}).json()
+            self.assertEqual(course["name"], "Mathematics")
+            self.assertEqual(teacher.post("/api/courses", json={"name": "mathematics"}).status_code, 409)
+            self.assertEqual(teacher.get("/api/courses").json(), [course])
+            self.assertEqual(other.get("/api/courses").json(), [])
+            self.assertEqual(student.get("/api/courses").status_code, 403)
+            self.assertEqual(student.post("/api/courses", json={"name": "Course"}).status_code, 403)
+            self.assertEqual(TestClient(app).get("/api/courses").status_code, 401)
+            exam = {"title": "Test", "minutes": 10, "courseId": course["id"], "subject": "Tampered",
+                    "questions": [{"text": "Q", "options": ["A", "B", "C", "D"], "correct": 0}]}
+            self.assertEqual(other.post("/api/exams", json=exam).status_code, 403)
+            self.assertEqual(teacher.post("/api/exams", json={**exam, "courseId": "missing"}).status_code, 403)
+            self.assertEqual(teacher.post("/api/exams", json=exam).status_code, 200)
+            saved = teacher.get("/api/exams").json()[0]
+            self.assertEqual(saved["courseId"], course["id"])
+            self.assertEqual(saved["subject"], "Mathematics")
+
+    def test_exam_schedule_is_validated_and_enforced(self):
+        db = mongomock.MongoClient().exam_test
+        teacher, student = TestClient(app), TestClient(app)
+        with patch("app.examflow_api.database", return_value=db), patch("app.examflow_api.now_ms", return_value=1000000) as clock:
+            for client, role in [(teacher, "teacher"), (student, "student")]:
+                self.assertEqual(client.post("/api/auth/register", json={"name": role, "email": role + "@example.test", "password": "password123", "role": role}).status_code, 200)
+            body = {"title": "Scheduled", "minutes": 30, "opensAt": 1000100, "closesAt": 1001000,
+                    "questions": [{"text": "Q", "options": ["A", "B", "C", "D"], "correct": 0}]}
+            for invalid in [{"closesAt": 1000100}, {"opensAt": "tomorrow"}, {"closesAt": True}]:
+                self.assertEqual(teacher.post("/api/exams", json={**body, **invalid}).status_code, 400)
+            exam = teacher.post("/api/exams", json=body).json()
+            self.assertEqual(teacher.get("/api/exams").json()[0]["opensAt"], body["opensAt"])
+            start = {"exam": exam["id"], "name": "Student", "cameraConsent": True}
+            self.assertEqual(student.post("/api/join", json={"code": exam["code"]}).status_code, 403)
+            self.assertEqual(student.post("/api/start", json=start).status_code, 403)
+            clock.return_value = body["opensAt"]
+            self.assertEqual(student.post("/api/join", json={"code": exam["code"]}).status_code, 200)
+            attempt = student.post("/api/start", json=start).json()
+            self.assertEqual(attempt["deadline"], body["closesAt"])
+            path = "/api/attempt/" + attempt["id"]
+            self.assertEqual(student.post(path + "/answers", json={"answers": {"0": 0}}).status_code, 200)
+            clock.return_value = body["closesAt"]
+            self.assertEqual(student.post("/api/join", json={"code": exam["code"]}).status_code, 403)
+            self.assertEqual(student.post("/api/start", json=start).status_code, 403)
+            self.assertEqual(student.post(path + "/answers", json={"answers": {"0": 1}}).status_code, 409)
+            self.assertEqual(student.get("/api/student/history").json()[0]["status"], "expired")
+            self.assertEqual(student.post(path + "/submit", json={}).json()["score"], 1)
+
     def test_student_history_is_private_and_excludes_answers(self):
         db = mongomock.MongoClient().exam_test
         student, other, teacher = TestClient(app), TestClient(app), TestClient(app)

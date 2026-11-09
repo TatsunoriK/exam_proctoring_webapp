@@ -61,6 +61,19 @@ def now_ms():
     return int(time.time() * 1000)
 
 
+def exam_deadline(attempt, exam_body):
+    deadline = attempt["started"] + exam_body["minutes"] * 60000
+    return min(deadline, exam_body["closesAt"]) if exam_body.get("closesAt") is not None else deadline
+
+
+def check_exam_window(body):
+    timestamp = now_ms()
+    if body.get("opensAt") is not None and timestamp < body["opensAt"]:
+        fail("ยังไม่ถึงเวลาเปิดสอบ", 403)
+    if body.get("closesAt") is not None and timestamp >= body["closesAt"]:
+        fail("ปิดรับการทำข้อสอบแล้ว", 403)
+
+
 def digest(value: str):
     return hashlib.sha256(value.encode()).hexdigest()
 
@@ -140,6 +153,29 @@ def me(request: Request):
     return {"name": user["name"], "role": user["role"]}
 
 
+@router.get("/courses")
+def courses(request: Request):
+    user = current(request, "teacher")
+    return [{"id": c["_id"], "name": c["name"]}
+            for c in database().exam_courses.find({"owner": user["_id"]}).sort("name", 1)]
+
+
+@router.post("/courses")
+async def create_course(request: Request):
+    user = current(request, "teacher")
+    body = await request.json()
+    name = body.get("name")
+    if not isinstance(name, str) or not 1 <= len(name.strip()) <= 120:
+        fail("กรุณาระบุชื่อรายวิชาไม่เกิน 120 ตัวอักษร")
+    name = " ".join(name.split())
+    course_id = digest(user["_id"] + ":course:" + name.casefold())
+    try:
+        database().exam_courses.insert_one({"_id": course_id, "owner": user["_id"], "name": name, "created": now_ms()})
+    except DuplicateKeyError:
+        fail("มีรายวิชาชื่อนี้แล้ว", 409)
+    return {"id": course_id, "name": name}
+
+
 @router.get("/exams")
 def exams(request: Request):
     user = current(request, "teacher")
@@ -151,12 +187,25 @@ def exams(request: Request):
 async def create_exam(request: Request):
     user = current(request, "teacher")
     body = await request.json()
+    course_id = body.get("courseId")
+    course = None
+    if course_id is not None:
+        if not isinstance(course_id, str):
+            fail("รายวิชาไม่ถูกต้อง")
+        course = database().exam_courses.find_one({"_id": course_id, "owner": user["_id"]})
+        if not course:
+            fail("ไม่พบรายวิชาหรือไม่มีสิทธิ์ใช้งาน", 403)
     questions = body.get("questions")
     device_mode = body.get("deviceMode", "pc")
     if device_mode not in ("pc", "mobile"):
         fail("กรุณาเลือกอุปกรณ์สอบ")
     if not isinstance(body.get("title"), str) or not body["title"].strip() or len(body["title"]) > 200 or type(body.get("minutes")) is not int or not 1 <= body["minutes"] <= 180 or not isinstance(questions, list) or not 1 <= len(questions) <= 100:
         fail("ตรวจสอบชื่อข้อสอบ เวลา และคำถาม")
+    opens_at, closes_at = body.get("opensAt"), body.get("closesAt")
+    if any(value is not None and (type(value) is not int or not 0 < value <= 8640000000000000) for value in (opens_at, closes_at)):
+        fail("วันเวลาเปิด–ปิดสอบไม่ถูกต้อง")
+    if opens_at is not None and closes_at is not None and closes_at <= opens_at:
+        fail("เวลาปิดสอบต้องอยู่หลังเวลาเปิดสอบ")
     random_questions = body.get("randomQuestions", False)
     shuffle_options = body.get("shuffleOptions", False)
     question_count = body.get("questionCount", len(questions)) if random_questions else len(questions)
@@ -174,7 +223,7 @@ async def create_exam(request: Request):
     exam_id = uuid.uuid4().hex
     code = secrets.token_hex(5).upper()
     database().exam_exams.insert_one({"_id": exam_id, "owner": user["_id"], "code": code,
-                                     "body": {"title": body["title"], "subject": str(body.get("subject", "ทั่วไป"))[:200], "minutes": body["minutes"], "deviceMode": device_mode, "questions": questions, "randomQuestions": random_questions, "questionCount": question_count, "shuffleOptions": shuffle_options}, "created": now_ms()})
+                                     "body": {"title": body["title"], "courseId": course_id, "subject": course["name"] if course else str(body.get("subject", "ทั่วไป"))[:200], "minutes": body["minutes"], "deviceMode": device_mode, "opensAt": opens_at, "closesAt": closes_at, "questions": questions, "randomQuestions": random_questions, "questionCount": question_count, "shuffleOptions": shuffle_options}, "created": now_ms()})
     return {"id": exam_id, "code": code}
 
 
@@ -185,7 +234,8 @@ async def join(request: Request):
     exam = database().exam_exams.find_one({"code": str(body.get("code", "")).strip().upper()})
     if not exam:
         fail("ไม่พบรหัสข้อสอบ", 404)
-    return {"id": exam["_id"], "title": exam["body"]["title"], "minutes": exam["body"]["minutes"], "count": exam["body"].get("questionCount", len(exam["body"]["questions"])), "deviceMode": exam["body"].get("deviceMode", "pc")}
+    check_exam_window(exam["body"])
+    return {"opensAt": exam["body"].get("opensAt"), "closesAt": exam["body"].get("closesAt"), "id": exam["_id"], "title": exam["body"]["title"], "minutes": exam["body"]["minutes"], "count": exam["body"].get("questionCount", len(exam["body"]["questions"])), "deviceMode": exam["body"].get("deviceMode", "pc")}
 
 
 @router.post("/start")
@@ -199,6 +249,7 @@ async def start(request: Request):
     exam = db.exam_exams.find_one({"_id": body.get("exam")})
     if not exam:
         fail("ไม่พบข้อสอบ", 404)
+    check_exam_window(exam["body"])
     if mode != exam["body"].get("deviceMode", "pc"):
         fail("อุปกรณ์ไม่ตรงกับที่อาจารย์กำหนด", 403)
     attempt_id = digest(exam["_id"] + ":" + user["_id"])
@@ -207,7 +258,7 @@ async def start(request: Request):
         fail("คุณส่งข้อสอบนี้แล้ว", 409)
     if attempt.get("deviceMode", "pc") != mode:
         fail("การสอบนี้เริ่มด้วยอุปกรณ์อีกโหมด กรุณาเลือกโหมดเดิม", 409)
-    return {"id": attempt_id, "deviceMode": attempt.get("deviceMode", "pc"), "deadline": attempt["started"] + exam["body"]["minutes"] * 60000, "answers": attempt["answers"], "questions": [{k: v for k, v in q.items() if k != "correct"} for q in attempt.get("questions", exam["body"]["questions"])]}
+    return {"id": attempt_id, "deviceMode": attempt.get("deviceMode", "pc"), "deadline": exam_deadline(attempt, exam["body"]), "answers": attempt["answers"], "questions": [{k: v for k, v in q.items() if k != "correct"} for q in attempt.get("questions", exam["body"]["questions"])]}
 
 
 def student_attempt(request: Request, attempt_id: str, allow_recent_submission: bool = False):
@@ -292,7 +343,7 @@ async def attempt_action(attempt_id: str, action: str, request: Request):
         db.exam_attempts.update_one({"_id": attempt_id}, {"$push": {"events": {"type": str(body.get("type", ""))[:120], "time": now_ms()}}})
         return {"ok": True}
     if action == "answers":
-        if now_ms() > attempt["started"] + exam["body"]["minutes"] * 60000:
+        if now_ms() >= exam_deadline(attempt, exam["body"]):
             fail("หมดเวลาสอบแล้ว", 409)
         answers = body.get("answers", {})
         if not isinstance(answers, dict) or any(not str(k).isdigit() or int(k) >= len(attempt.get("questions", exam["body"]["questions"])) or type(v) is not int or not 0 <= v <= 3 for k, v in answers.items()):
@@ -322,7 +373,7 @@ def student_history(request: Request):
     for a in attempts:
         exam = exams.get(a["exam"])
         submitted = a.get("submitted")
-        expired = exam and now_ms() >= a["started"] + exam["minutes"] * 60000
+        expired = exam and now_ms() >= exam_deadline(a, exam)
         history.append({"id": a["_id"], "title": exam["title"] if exam else "ข้อสอบที่ไม่พร้อมใช้งาน",
                         "subject": exam.get("subject", "ทั่วไป") if exam else "",
                         "total": len(a["questions"]) if "questions" in a else exam.get("questionCount", len(exam["questions"])) if exam else None,
