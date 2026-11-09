@@ -337,7 +337,7 @@ def results(exam_id: str, request: Request):
     db = database()
     if not db.exam_exams.find_one({"_id": exam_id, "owner": user["_id"]}):
         fail("ไม่มีสิทธิ์", 403)
-    return [{"id": a["_id"], "name": a["name"], "email": a.get("student", ""), "total": len(a["questions"]) if "questions" in a else None, "deviceMode": a.get("deviceMode", "pc"), "started": a["started"], "submitted": a["submitted"], "score": a.get("score"), "events": a["events"], "recordings": a.get("recordings", []), "recordingTimings": a.get("recordingTimings", []), "cameraRecordings": a["cameraRecordings"], "proctoringEvents": a["proctoringEvents"], "reviews": a.get("reviews", {})} for a in db.exam_attempts.find({"exam": exam_id}).sort("started", -1)]
+    return [{"id": a["_id"], "name": a["name"], "email": a.get("student", ""), "total": len(a["questions"]) if "questions" in a else None, "deviceMode": a.get("deviceMode", "pc"), "started": a["started"], "submitted": a["submitted"], "score": a.get("score"), "events": a["events"], "recordings": a.get("recordings", []), "recordingTimings": a.get("recordingTimings", []), "cameraRecordings": a["cameraRecordings"], "proctoringEvents": a["proctoringEvents"], "review": a.get("review", {"status": "pending"}), "reviews": a.get("reviews", {})} for a in db.exam_attempts.find({"exam": exam_id}).sort("started", -1)]
 
 
 def video_response(obj, request: Request):
@@ -379,6 +379,22 @@ def screen_video(attempt_id: str, index: int, request: Request):
         fail("ไม่พบคลิป", 404)
     obj = GridFSBucket(db, bucket_name="screen_clips").open_download_stream(ObjectId(recordings[index]))
     return video_response(obj, request)
+
+
+@router.post("/review/{attempt_id}")
+async def review_attempt(attempt_id: str, request: Request):
+    user = current(request, "teacher")
+    db = database()
+    attempt = db.exam_attempts.find_one({"_id": attempt_id})
+    if not attempt or not db.exam_exams.find_one({"_id": attempt["exam"], "owner": user["_id"]}):
+        fail("ไม่มีสิทธิ์", 403)
+    body = await request.json()
+    status = body.get("status")
+    if status not in ("pending", "normal", "misconduct"):
+        fail("สถานะไม่ถูกต้อง")
+    result = {"status": status, "updated": now_ms(), "reviewer": user["_id"]}
+    db.exam_attempts.update_one({"_id": attempt_id}, {"$set": {"review": result}})
+    return result
 
 
 @router.post("/review/{attempt_id}/{clip_id}")
