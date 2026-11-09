@@ -10,6 +10,36 @@ from app.main import app
 
 
 class ExamFlowTest(unittest.TestCase):
+    def test_student_history_is_private_and_excludes_answers(self):
+        db = mongomock.MongoClient().exam_test
+        student, other, teacher = TestClient(app), TestClient(app), TestClient(app)
+        with patch("app.examflow_api.database", return_value=db):
+            for client, email, role in [(student, "first@example.test", "student"),
+                                        (other, "other@example.test", "student"),
+                                        (teacher, "teacher@example.test", "teacher")]:
+                self.assertEqual(client.post("/api/auth/register", json={"name": "Test user", "email": email,
+                                 "password": "password123", "role": role}).status_code, 200)
+            db.exam_exams.insert_one({"_id": "exam", "body": {"title": "History exam", "minutes": 10,
+                                      "questions": [{"correct": 2}]}})
+            db.exam_attempts.insert_many([
+                {"_id": "mine", "student": "first@example.test", "exam": "exam", "started": 1,
+                 "submitted": 2, "score": 0, "reviews": {"private": "data"}, "answers": {"0": 1}},
+                {"_id": "missing", "student": "first@example.test", "exam": "deleted", "started": 3,
+                 "submitted": None},
+                {"_id": "theirs", "student": "other@example.test", "exam": "exam", "started": 4}])
+            response = student.get("/api/student/history")
+            self.assertEqual(response.status_code, 200)
+            history = response.json()
+            self.assertEqual([a["id"] for a in history], ["missing", "mine"])
+            self.assertEqual(history[1]["score"], 0)
+            self.assertEqual(history[1]["total"], 1)
+            self.assertNotIn("reviews", history[1])
+            self.assertNotIn("answers", history[1])
+            self.assertNotIn("correct", response.text)
+            self.assertEqual(len(other.get("/api/student/history").json()), 1)
+            self.assertEqual(teacher.get("/api/student/history").status_code, 403)
+            self.assertEqual(TestClient(app).get("/api/student/history").status_code, 401)
+
     def test_screen_clip_is_stored_and_only_exam_owner_can_view(self):
         db = mongomock.MongoClient().exam_test
         teacher, student, other = TestClient(app), TestClient(app), TestClient(app)

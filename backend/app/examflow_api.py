@@ -20,6 +20,7 @@ from pymongo.errors import PyMongoError
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
+from .exam_questions import attempt_questions
 from .database import database
 from .clip_analysis import MAX_BYTES, analyze_video, store_flagged_clip
 from fastapi.concurrency import run_in_threadpool
@@ -156,13 +157,24 @@ async def create_exam(request: Request):
         fail("กรุณาเลือกอุปกรณ์สอบ")
     if not isinstance(body.get("title"), str) or not body["title"].strip() or len(body["title"]) > 200 or type(body.get("minutes")) is not int or not 1 <= body["minutes"] <= 180 or not isinstance(questions, list) or not 1 <= len(questions) <= 100:
         fail("ตรวจสอบชื่อข้อสอบ เวลา และคำถาม")
+    random_questions = body.get("randomQuestions", False)
+    shuffle_options = body.get("shuffleOptions", False)
+    question_count = body.get("questionCount", len(questions)) if random_questions else len(questions)
+    if type(random_questions) is not bool or type(shuffle_options) is not bool or type(question_count) is not int or not 1 <= question_count <= len(questions):
+        fail("ตรวจสอบจำนวนข้อที่ต้องการสุ่ม")
+    if sum(len(q.get("image", "")) for q in questions if isinstance(q, dict) and isinstance(q.get("image", ""), str)) > 8000000:
+        fail("รูปภาพรวมมีขนาดใหญ่เกินไป")
     for q in questions:
         if not isinstance(q, dict) or not isinstance(q.get("text"), str) or not q["text"].strip() or not isinstance(q.get("options"), list) or len(q["options"]) != 4 or any(not isinstance(o, str) or not o.strip() for o in q["options"]) or type(q.get("correct")) is not int or not 0 <= q["correct"] < 4:
             fail("ตรวจสอบคำถามและตัวเลือก")
+    for q in questions:
+        image = q.get("image", "")
+        if not isinstance(image, str) or len(image) > 1400000 or (image and not re.fullmatch(r"data:image/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+", image)):
+            fail("รูปคำถามต้องเป็น PNG, JPEG หรือ WebP ขนาดไม่เกิน 1 MB")
     exam_id = uuid.uuid4().hex
     code = secrets.token_hex(5).upper()
     database().exam_exams.insert_one({"_id": exam_id, "owner": user["_id"], "code": code,
-                                     "body": {"title": body["title"], "subject": str(body.get("subject", "ทั่วไป"))[:200], "minutes": body["minutes"], "deviceMode": device_mode, "questions": questions}, "created": now_ms()})
+                                     "body": {"title": body["title"], "subject": str(body.get("subject", "ทั่วไป"))[:200], "minutes": body["minutes"], "deviceMode": device_mode, "questions": questions, "randomQuestions": random_questions, "questionCount": question_count, "shuffleOptions": shuffle_options}, "created": now_ms()})
     return {"id": exam_id, "code": code}
 
 
@@ -173,7 +185,7 @@ async def join(request: Request):
     exam = database().exam_exams.find_one({"code": str(body.get("code", "")).strip().upper()})
     if not exam:
         fail("ไม่พบรหัสข้อสอบ", 404)
-    return {"id": exam["_id"], "title": exam["body"]["title"], "minutes": exam["body"]["minutes"], "count": len(exam["body"]["questions"]), "deviceMode": exam["body"].get("deviceMode", "pc")}
+    return {"id": exam["_id"], "title": exam["body"]["title"], "minutes": exam["body"]["minutes"], "count": exam["body"].get("questionCount", len(exam["body"]["questions"])), "deviceMode": exam["body"].get("deviceMode", "pc")}
 
 
 @router.post("/start")
@@ -190,12 +202,12 @@ async def start(request: Request):
     if mode != exam["body"].get("deviceMode", "pc"):
         fail("อุปกรณ์ไม่ตรงกับที่อาจารย์กำหนด", 403)
     attempt_id = digest(exam["_id"] + ":" + user["_id"])
-    attempt = db.exam_attempts.find_one_and_update({"_id": attempt_id}, {"$setOnInsert": {"exam": exam["_id"], "student": user["_id"], "name": str(body["name"])[:120], "deviceMode": mode, "started": now_ms(), "answers": {}, "events": [], "recordings": [], "cameraRecordings": [], "proctoringEvents": [], "submitted": None}}, upsert=True, return_document=ReturnDocument.AFTER)
+    attempt = db.exam_attempts.find_one_and_update({"_id": attempt_id}, {"$setOnInsert": {"exam": exam["_id"], "student": user["_id"], "name": str(body["name"])[:120], "deviceMode": mode, "started": now_ms(), "answers": {}, "questions": attempt_questions(exam["body"]), "events": [], "recordings": [], "cameraRecordings": [], "proctoringEvents": [], "submitted": None}}, upsert=True, return_document=ReturnDocument.AFTER)
     if attempt["submitted"]:
         fail("คุณส่งข้อสอบนี้แล้ว", 409)
     if attempt.get("deviceMode", "pc") != mode:
         fail("การสอบนี้เริ่มด้วยอุปกรณ์อีกโหมด กรุณาเลือกโหมดเดิม", 409)
-    return {"id": attempt_id, "deviceMode": attempt.get("deviceMode", "pc"), "deadline": attempt["started"] + exam["body"]["minutes"] * 60000, "answers": attempt["answers"], "questions": [{k: v for k, v in q.items() if k != "correct"} for q in exam["body"]["questions"]]}
+    return {"id": attempt_id, "deviceMode": attempt.get("deviceMode", "pc"), "deadline": attempt["started"] + exam["body"]["minutes"] * 60000, "answers": attempt["answers"], "questions": [{k: v for k, v in q.items() if k != "correct"} for q in attempt.get("questions", exam["body"]["questions"])]}
 
 
 def student_attempt(request: Request, attempt_id: str, allow_recent_submission: bool = False):
@@ -283,12 +295,12 @@ async def attempt_action(attempt_id: str, action: str, request: Request):
         if now_ms() > attempt["started"] + exam["body"]["minutes"] * 60000:
             fail("หมดเวลาสอบแล้ว", 409)
         answers = body.get("answers", {})
-        if not isinstance(answers, dict) or any(not str(k).isdigit() or int(k) >= len(exam["body"]["questions"]) or type(v) is not int or not 0 <= v <= 3 for k, v in answers.items()):
+        if not isinstance(answers, dict) or any(not str(k).isdigit() or int(k) >= len(attempt.get("questions", exam["body"]["questions"])) or type(v) is not int or not 0 <= v <= 3 for k, v in answers.items()):
             fail("คำตอบไม่ถูกต้อง")
         db.exam_attempts.update_one({"_id": attempt_id}, {"$set": {"answers": answers}})
         return {"ok": True}
     if action == "submit":
-        questions = exam["body"]["questions"]
+        questions = attempt.get("questions", exam["body"]["questions"])
         score = sum(attempt["answers"].get(str(i)) == q["correct"] for i, q in enumerate(questions))
         update = {"$set": {"submitted": now_ms(), "score": score}}
         if body.get("analysisIncomplete") is True:
@@ -298,13 +310,61 @@ async def attempt_action(attempt_id: str, action: str, request: Request):
     fail("ไม่พบรายการ", 404)
 
 
+@router.get("/student/history")
+def student_history(request: Request):
+    user = current(request, "student")
+    db = database()
+    attempts = list(db.exam_attempts.find({"student": user["_id"]},
+                    {"exam": 1, "started": 1, "submitted": 1, "score": 1, "questions": 1}).sort("started", -1))
+    exam_ids = list({a["exam"] for a in attempts})
+    exams = {e["_id"]: e["body"] for e in db.exam_exams.find({"_id": {"$in": exam_ids}}, {"body": 1})}
+    history = []
+    for a in attempts:
+        exam = exams.get(a["exam"])
+        submitted = a.get("submitted")
+        expired = exam and now_ms() >= a["started"] + exam["minutes"] * 60000
+        history.append({"id": a["_id"], "title": exam["title"] if exam else "ข้อสอบที่ไม่พร้อมใช้งาน",
+                        "subject": exam.get("subject", "ทั่วไป") if exam else "",
+                        "total": len(a["questions"]) if "questions" in a else exam.get("questionCount", len(exam["questions"])) if exam else None,
+                        "started": a["started"], "submitted": submitted, "score": a.get("score") if submitted else None,
+                        "status": "submitted" if submitted else "expired" if expired else "in_progress"})
+    return history
+
+
 @router.get("/results/{exam_id}")
 def results(exam_id: str, request: Request):
     user = current(request, "teacher")
     db = database()
     if not db.exam_exams.find_one({"_id": exam_id, "owner": user["_id"]}):
         fail("ไม่มีสิทธิ์", 403)
-    return [{"id": a["_id"], "name": a["name"], "deviceMode": a.get("deviceMode", "pc"), "started": a["started"], "submitted": a["submitted"], "score": a.get("score"), "events": a["events"], "recordings": a.get("recordings", []), "recordingTimings": a.get("recordingTimings", []), "cameraRecordings": a["cameraRecordings"], "proctoringEvents": a["proctoringEvents"], "reviews": a.get("reviews", {})} for a in db.exam_attempts.find({"exam": exam_id}).sort("started", -1)]
+    return [{"id": a["_id"], "name": a["name"], "email": a.get("student", ""), "total": len(a["questions"]) if "questions" in a else None, "deviceMode": a.get("deviceMode", "pc"), "started": a["started"], "submitted": a["submitted"], "score": a.get("score"), "events": a["events"], "recordings": a.get("recordings", []), "recordingTimings": a.get("recordingTimings", []), "cameraRecordings": a["cameraRecordings"], "proctoringEvents": a["proctoringEvents"], "reviews": a.get("reviews", {})} for a in db.exam_attempts.find({"exam": exam_id}).sort("started", -1)]
+
+
+def video_response(obj, request: Request):
+    """Serve a single byte range so browsers can seek in stored recordings."""
+    headers = {"Cache-Control": "private, no-store", "Accept-Ranges": "bytes"}
+    media_type = (obj.metadata or {}).get("content_type", "video/webm")
+    try:
+        size = obj.length
+        requested = request.headers.get("range")
+        if not requested:
+            return Response(obj.read(), media_type=media_type, headers=headers)
+        match = re.fullmatch(r"bytes=([0-9]*)-([0-9]*)", requested.strip())
+        if not match or not any(match.groups()):
+            return Response(status_code=416, headers={**headers, "Content-Range": f"bytes */{size}"})
+        first, last = match.groups()
+        if first:
+            start = int(first)
+            end = min(int(last), size - 1) if last else size - 1
+        else:
+            start, end = max(0, size - int(last)), size - 1
+        if start > end or start >= size:
+            return Response(status_code=416, headers={**headers, "Content-Range": f"bytes */{size}"})
+        obj.seek(start)
+        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+        return Response(obj.read(end - start + 1), status_code=206, media_type=media_type, headers=headers)
+    finally:
+        obj.close()
 
 
 @router.get("/video/{attempt_id}/{index}")
@@ -318,7 +378,7 @@ def screen_video(attempt_id: str, index: int, request: Request):
     if index < 0 or index >= len(recordings):
         fail("ไม่พบคลิป", 404)
     obj = GridFSBucket(db, bucket_name="screen_clips").open_download_stream(ObjectId(recordings[index]))
-    return Response(obj.read(), media_type=obj.metadata.get("content_type", "video/webm"), headers={"Cache-Control": "private, no-store"})
+    return video_response(obj, request)
 
 
 @router.post("/review/{attempt_id}/{clip_id}")
@@ -350,4 +410,4 @@ def camera(attempt_id: str, index: int, request: Request):
     if index < 0 or index >= len(attempt["cameraRecordings"]):
         fail("ไม่พบคลิป", 404)
     obj = GridFSBucket(db, bucket_name="review_clips").open_download_stream(ObjectId(attempt["cameraRecordings"][index]))
-    return Response(obj.read(), media_type=obj.metadata.get("content_type", "video/webm"), headers={"Cache-Control": "private, no-store"})
+    return video_response(obj, request)
