@@ -95,6 +95,9 @@ def current(request: Request, role: str | None = None):
     user = db.exam_users.find_one({"_id": session["user_id"]}) if session else None
     if not user:
         fail("กรุณาเข้าสู่ระบบก่อนใช้งาน", 401)
+    expected_user = request.headers.get("x-examflow-user")
+    if expected_user and expected_user != user["_id"]:
+        fail("บัญชีผู้ใช้เปลี่ยนแล้ว กรุณาโหลดหน้าใหม่", 409)
     if role and user["role"] != role:
         fail("บัญชีนี้ไม่มีสิทธิ์", 403)
     return user
@@ -150,7 +153,7 @@ def logout(request: Request):
 @router.get("/me")
 def me(request: Request):
     user = current(request)
-    return {"name": user["name"], "role": user["role"]}
+    return {"id": user["_id"], "name": user["name"], "role": user["role"]}
 
 
 @router.get("/courses")
@@ -227,14 +230,86 @@ async def create_exam(request: Request):
     return {"id": exam_id, "code": code}
 
 
+@router.post("/exams/{exam_id}/availability")
+async def set_exam_availability(exam_id: str, request: Request):
+    user = current(request, "teacher")
+    body = await request.json()
+    if type(body.get("acceptingAttempts")) is not bool:
+        fail("สถานะเปิดรับเข้าสอบไม่ถูกต้อง")
+    db = database()
+    exam = db.exam_exams.find_one({"_id": exam_id, "owner": user["_id"]})
+    if not exam:
+        fail("ไม่พบข้อสอบหรือไม่มีสิทธิ์", 403)
+    updates = {"acceptingAttempts": body["acceptingAttempts"]}
+    if body["acceptingAttempts"] and ("opensAt" in body or "closesAt" in body):
+        opens_at, closes_at = body.get("opensAt"), body.get("closesAt")
+        if any(value is not None and (type(value) is not int or not 0 < value <= 8640000000000000) for value in (opens_at, closes_at)):
+            fail("วันเวลาเปิด–ปิดสอบไม่ถูกต้อง")
+        if opens_at is not None and closes_at is not None and closes_at <= opens_at:
+            fail("เวลาปิดสอบต้องอยู่หลังเวลาเปิดสอบ")
+        if closes_at is not None and closes_at <= now_ms():
+            fail("กรุณากำหนดเวลาปิดสอบในอนาคต หรือเว้นว่างเพื่อไม่จำกัด")
+        updates.update({"opensAt": opens_at, "closesAt": closes_at})
+    result = db.exam_exams.update_one(
+        {"_id": exam_id, "owner": user["_id"]},
+        {"$set": {"body." + key: value for key, value in updates.items()}})
+    if not result.matched_count:
+        fail("ไม่พบข้อสอบหรือไม่มีสิทธิ์", 403)
+    if body["acceptingAttempts"] is False:
+        for attempt in db.exam_attempts.find({"exam": exam_id, "submitted": None}):
+            finalize_attempt(db, attempt["_id"], exam["body"], forced=True)
+    return updates
+
+
+def check_admission(db, exam, user):
+    if exam["body"].get("acceptingAttempts", True) is False:
+        fail("อาจารย์ปิดสอบแล้ว", 403)
+
+
+def finalize_attempt(db, attempt_id, exam_body, forced=False):
+    # Compare the answer snapshot so a concurrent save cannot lose points.
+    while True:
+        attempt = db.exam_attempts.find_one({"_id": attempt_id})
+        if attempt.get("submitted") is not None:
+            return attempt
+        questions = attempt.get("questions", exam_body["questions"])
+        score = sum(attempt.get("answers", {}).get(str(i)) == q["correct"] for i, q in enumerate(questions))
+        result = db.exam_attempts.find_one_and_update(
+            {"_id": attempt_id, "submitted": None, "answers": attempt.get("answers", {})},
+            {"$set": {"submitted": now_ms(), "score": score, "forcedSubmitted": forced}},
+            return_document=ReturnDocument.AFTER)
+        if result:
+            return result
+
+
+def attempt_result(attempt, exam_body):
+    return {"score": attempt["score"], "total": len(attempt.get("questions", exam_body["questions"])),
+            "forcedSubmitted": attempt.get("forcedSubmitted", False)}
+
+
+@router.get("/attempt/{attempt_id}/status")
+def attempt_status(attempt_id: str, request: Request):
+    user = current(request, "student")
+    db = database()
+    attempt = db.exam_attempts.find_one({"_id": attempt_id, "student": user["_id"]})
+    if not attempt:
+        fail("ไม่พบการสอบหรือไม่มีสิทธิ์", 403)
+    exam = db.exam_exams.find_one({"_id": attempt["exam"]})
+    if exam["body"].get("acceptingAttempts", True) is False and attempt.get("submitted") is None:
+        attempt = finalize_attempt(db, attempt_id, exam["body"], forced=True)
+    return {"submitted": attempt.get("submitted"),
+            **(attempt_result(attempt, exam["body"]) if attempt.get("submitted") is not None else {})}
+
+
 @router.post("/join")
 async def join(request: Request):
-    current(request, "student")
+    user = current(request, "student")
     body = await request.json()
     exam = database().exam_exams.find_one({"code": str(body.get("code", "")).strip().upper()})
     if not exam:
         fail("ไม่พบรหัสข้อสอบ", 404)
     check_exam_window(exam["body"])
+    check_admission(database(), exam, user)
     return {"opensAt": exam["body"].get("opensAt"), "closesAt": exam["body"].get("closesAt"), "id": exam["_id"], "title": exam["body"]["title"], "minutes": exam["body"]["minutes"], "count": exam["body"].get("questionCount", len(exam["body"]["questions"])), "deviceMode": exam["body"].get("deviceMode", "pc")}
 
 
@@ -250,10 +325,15 @@ async def start(request: Request):
     if not exam:
         fail("ไม่พบข้อสอบ", 404)
     check_exam_window(exam["body"])
+    check_admission(db, exam, user)
     if mode != exam["body"].get("deviceMode", "pc"):
         fail("อุปกรณ์ไม่ตรงกับที่อาจารย์กำหนด", 403)
     attempt_id = digest(exam["_id"] + ":" + user["_id"])
     attempt = db.exam_attempts.find_one_and_update({"_id": attempt_id}, {"$setOnInsert": {"exam": exam["_id"], "student": user["_id"], "name": str(body["name"])[:120], "deviceMode": mode, "started": now_ms(), "answers": {}, "questions": attempt_questions(exam["body"]), "events": [], "recordings": [], "cameraRecordings": [], "proctoringEvents": [], "submitted": None}}, upsert=True, return_document=ReturnDocument.AFTER)
+    latest_exam = db.exam_exams.find_one({"_id": exam["_id"]})
+    if latest_exam["body"].get("acceptingAttempts", True) is False:
+        finalize_attempt(db, attempt_id, latest_exam["body"], forced=True)
+        fail("อาจารย์ปิดสอบแล้ว", 403)
     if attempt["submitted"]:
         fail("คุณส่งข้อสอบนี้แล้ว", 409)
     if attempt.get("deviceMode", "pc") != mode:
@@ -261,11 +341,11 @@ async def start(request: Request):
     return {"id": attempt_id, "deviceMode": attempt.get("deviceMode", "pc"), "deadline": exam_deadline(attempt, exam["body"]), "answers": attempt["answers"], "questions": [{k: v for k, v in q.items() if k != "correct"} for q in attempt.get("questions", exam["body"]["questions"])]}
 
 
-def student_attempt(request: Request, attempt_id: str, allow_recent_submission: bool = False):
+def student_attempt(request: Request, attempt_id: str, allow_recent_submission: bool = False, allow_submitted: bool = False):
     user = current(request, "student")
     db = database()
     attempt = db.exam_attempts.find_one({"_id": attempt_id, "student": user["_id"]})
-    if not attempt or (attempt.get("submitted") is not None and
+    if not attempt or (not allow_submitted and attempt.get("submitted") is not None and
                        (not allow_recent_submission or now_ms() - attempt["submitted"] > 120000)):
         fail("ไม่พบการสอบหรือไม่มีสิทธิ์", 403)
     return db, attempt, db.exam_exams.find_one({"_id": attempt["exam"]})
@@ -289,7 +369,7 @@ def store_screen_clip(db, attempt_id: str, data: bytes, content_type: str, timin
 
 @router.post("/attempt/{attempt_id}/{action}")
 async def attempt_action(attempt_id: str, action: str, request: Request):
-    db, attempt, exam = student_attempt(request, attempt_id, allow_recent_submission=action in ("camera", "camera-failure", "record", "record-failure"))
+    db, attempt, exam = student_attempt(request, attempt_id, allow_recent_submission=action in ("camera", "camera-failure", "record", "record-failure"), allow_submitted=action == "submit")
     if action == "record-failure":
         db.exam_attempts.update_one({"_id": attempt_id}, {"$push": {"events": {"type": "อัปโหลดคลิปหน้าจอไม่สำเร็จ", "time": now_ms()}}})
         return {"ok": True}
@@ -343,21 +423,23 @@ async def attempt_action(attempt_id: str, action: str, request: Request):
         db.exam_attempts.update_one({"_id": attempt_id}, {"$push": {"events": {"type": str(body.get("type", ""))[:120], "time": now_ms()}}})
         return {"ok": True}
     if action == "answers":
+        if exam["body"].get("acceptingAttempts", True) is False:
+            finalize_attempt(db, attempt_id, exam["body"], forced=True)
+            fail("อาจารย์ปิดสอบแล้ว", 409)
         if now_ms() >= exam_deadline(attempt, exam["body"]):
             fail("หมดเวลาสอบแล้ว", 409)
         answers = body.get("answers", {})
         if not isinstance(answers, dict) or any(not str(k).isdigit() or int(k) >= len(attempt.get("questions", exam["body"]["questions"])) or type(v) is not int or not 0 <= v <= 3 for k, v in answers.items()):
             fail("คำตอบไม่ถูกต้อง")
-        db.exam_attempts.update_one({"_id": attempt_id}, {"$set": {"answers": answers}})
+        saved = db.exam_attempts.update_one({"_id": attempt_id, "submitted": None}, {"$set": {"answers": answers}})
+        if not saved.matched_count:
+            fail("การสอบสิ้นสุดแล้ว", 409)
         return {"ok": True}
     if action == "submit":
-        questions = attempt.get("questions", exam["body"]["questions"])
-        score = sum(attempt["answers"].get(str(i)) == q["correct"] for i, q in enumerate(questions))
-        update = {"$set": {"submitted": now_ms(), "score": score}}
+        result = finalize_attempt(db, attempt_id, exam["body"], forced=exam["body"].get("acceptingAttempts", True) is False)
         if body.get("analysisIncomplete") is True:
-            update["$push"] = {"proctoringEvents": {"status": "analysis_failed", "reviewFlags": [], "segment": -1}}
-        db.exam_attempts.update_one({"_id": attempt_id, "submitted": None}, update)
-        return {"score": score, "total": len(questions)}
+            db.exam_attempts.update_one({"_id": attempt_id}, {"$push": {"proctoringEvents": {"status": "analysis_failed", "reviewFlags": [], "segment": -1}}})
+        return attempt_result(result, exam["body"])
     fail("ไม่พบรายการ", 404)
 
 

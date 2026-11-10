@@ -10,6 +10,75 @@ from app.main import app
 
 
 class ExamFlowTest(unittest.TestCase):
+    def test_exam_list_and_close_are_scoped_to_current_teacher(self):
+        db = mongomock.MongoClient().exam_test
+        first, second = TestClient(app), TestClient(app)
+        with patch("app.examflow_api.database", return_value=db):
+            for client, email in [(first, "first@example.test"), (second, "second@example.test")]:
+                client.post("/api/auth/register", json={"name": "Teacher", "email": email, "password": "password123", "role": "teacher"})
+            exam = first.post("/api/exams", json={"title": "Private", "minutes": 10, "questions": [{"text": "Q", "options": ["A", "B", "C", "D"], "correct": 0}]}).json()
+            self.assertEqual(len(first.get("/api/exams").json()), 1)
+            self.assertEqual(second.get("/api/exams").json(), [])
+            path = "/api/exams/" + exam["id"] + "/availability"
+            self.assertEqual(second.post(path, json={"acceptingAttempts": False}).status_code, 403)
+            self.assertEqual(first.post(path, json={"acceptingAttempts": False}, headers={"X-Examflow-User": "second@example.test"}).status_code, 409)
+            self.assertEqual(first.post(path, json={"acceptingAttempts": False}, headers={"X-Examflow-User": "first@example.test"}).status_code, 200)
+
+    def test_teacher_close_finalizes_saved_answers_and_preserves_score(self):
+        db = mongomock.MongoClient().exam_test
+        teacher, other, student, newcomer = [TestClient(app) for _ in range(4)]
+        with patch("app.examflow_api.database", return_value=db):
+            for client, name, role in [(teacher, "teacher", "teacher"), (other, "other", "teacher"),
+                                       (student, "student", "student"), (newcomer, "newcomer", "student")]:
+                client.post("/api/auth/register", json={"name": name, "email": name + "@example.test", "password": "password123", "role": role})
+            exam = teacher.post("/api/exams", json={"title": "Toggle", "minutes": 10,
+                "questions": [{"text": "Q", "options": ["A", "B", "C", "D"], "correct": 0}]}).json()
+            start = {"exam": exam["id"], "name": "Student", "cameraConsent": True}
+            attempt = student.post("/api/start", json=start).json()
+            answer_path = "/api/attempt/" + attempt["id"]
+            self.assertEqual(student.post(answer_path + "/answers", json={"answers": {"0": 0}}).status_code, 200)
+            path = "/api/exams/" + exam["id"] + "/availability"
+            self.assertEqual(other.post(path, json={"acceptingAttempts": False}).status_code, 403)
+            self.assertEqual(student.post(path, json={"acceptingAttempts": False}).status_code, 403)
+            self.assertEqual(teacher.post(path, json={"acceptingAttempts": "false"}).status_code, 400)
+            self.assertEqual(teacher.post(path, json={"acceptingAttempts": False}).status_code, 200)
+            self.assertFalse(teacher.get("/api/exams").json()[0]["acceptingAttempts"])
+            self.assertEqual(newcomer.post("/api/join", json={"code": exam["code"]}).status_code, 403)
+            self.assertEqual(newcomer.post("/api/start", json=start).status_code, 403)
+            self.assertEqual(student.post("/api/start", json=start).status_code, 403)
+            status = student.get(answer_path + "/status").json()
+            self.assertTrue(status["forcedSubmitted"])
+            self.assertEqual(status["score"], 1)
+            self.assertEqual(student.post(answer_path + "/answers", json={"answers": {"0": 1}}).status_code, 403)
+            self.assertEqual(student.post(answer_path + "/submit", json={}).json()["score"], 1)
+            self.assertEqual(newcomer.get(answer_path + "/status").status_code, 403)
+            self.assertEqual(teacher.post(path, json={"acceptingAttempts": True}).status_code, 200)
+            self.assertEqual(student.post("/api/start", json=start).status_code, 409)
+            self.assertEqual(student.get(answer_path + "/status").json()["score"], 1)
+            self.assertEqual(newcomer.post("/api/start", json=start).status_code, 200)
+            db.exam_exams.update_one({"_id": exam["id"]}, {"$set": {"body.closesAt": 1}})
+            self.assertEqual(newcomer.post("/api/join", json={"code": exam["code"]}).status_code, 403)
+
+    def test_reopening_can_replace_or_clear_optional_schedule(self):
+        db = mongomock.MongoClient().exam_test
+        teacher = TestClient(app)
+        with patch("app.examflow_api.database", return_value=db), patch("app.examflow_api.now_ms", return_value=1000):
+            teacher.post("/api/auth/register", json={"name": "Teacher", "email": "schedule@example.test", "password": "password123", "role": "teacher"})
+            exam = teacher.post("/api/exams", json={"title": "Scheduled", "minutes": 10, "opensAt": 100, "closesAt": 200,
+                "questions": [{"text": "Q", "options": ["A", "B", "C", "D"], "correct": 0}]}).json()
+            path = "/api/exams/" + exam["id"] + "/availability"
+            for schedule in ({"opensAt": 2000, "closesAt": 1500}, {"closesAt": 999}, {"opensAt": True}, {"closesAt": "tomorrow"}):
+                self.assertEqual(teacher.post(path, json={"acceptingAttempts": True, **schedule}).status_code, 400)
+            response = teacher.post(path, json={"acceptingAttempts": True, "opensAt": 2000, "closesAt": 3000})
+            self.assertEqual(response.status_code, 200)
+            saved = teacher.get("/api/exams").json()[0]
+            self.assertEqual((saved["opensAt"], saved["closesAt"]), (2000, 3000))
+            response = teacher.post(path, json={"acceptingAttempts": True, "opensAt": None, "closesAt": None})
+            self.assertEqual(response.status_code, 200)
+            saved = teacher.get("/api/exams").json()[0]
+            self.assertIsNone(saved["opensAt"])
+            self.assertIsNone(saved["closesAt"])
+
     def test_courses_are_private_and_exams_use_owned_course(self):
         db = mongomock.MongoClient().exam_test
         teacher, other, student = TestClient(app), TestClient(app), TestClient(app)
