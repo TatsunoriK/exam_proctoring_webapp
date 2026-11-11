@@ -21,9 +21,44 @@ npm run build
 
 ```bat
 cd backend
+py -3.13 -m venv .venv
 call .venv\Scripts\activate.bat
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+python -m pip install -r requirements.txt
+powershell -NoProfile -ExecutionPolicy Bypass -File setup_webcam_models.ps1
+
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
+
+## วิธี deploy และเปิดเซิร์ฟเวอร์บน Fly.io
+
+ติดตั้ง `flyctl` แล้ว login จากนั้นเปิด Terminal ที่โฟลเดอร์หลักของโปรเจกต์ (`D:\exam_proctoring_webapp`) โดยตั้งค่า MongoDB ก่อน deploy (ต้องแทนค่า `USERNAME`, `PASSWORD` และ `CLUSTER` ด้วยค่าจริงของคุณ):
+
+```powershell
+fly auth login
+fly secrets set MONGODB_URI="mongodb+srv://USERNAME:PASSWORD@CLUSTER.mongodb.net/?retryWrites=true&w=majority" MONGODB_DATABASE="exam_proctoring" --app exam-proctoring-webapp
+fly deploy --config .\fly.toml --dockerfile .\Dockerfile
+```
+
+ห้ามรันคำสั่ง `fly secrets set` ด้วยค่า placeholder ด้านบน หากยังไม่มี MongoDB URI ให้ข้ามคำสั่งนี้ไว้ก่อน แล้วตั้งค่าภายหลังด้วย URI จริง จากนั้น deploy ใหม่อีกครั้ง:
+
+```powershell
+fly secrets set MONGODB_URI="<your-real-mongodb-uri>" MONGODB_DATABASE="exam_proctoring" --app exam-proctoring-webapp
+fly deploy --config .\fly.toml --dockerfile .\Dockerfile
+```
+
+คำสั่ง `fly deploy` จะใช้ [fly.toml](fly.toml) และ [Dockerfile](Dockerfile) ในโฟลเดอร์ปัจจุบันเพื่อ build และ deploy แอป หากยังไม่มีแอปชื่อนี้ ให้สร้างก่อนด้วย:
+
+```powershell
+fly apps create exam-proctoring-webapp
+```
+
+หลัง deploy เสร็จ ให้เปิดเว็บไซต์ด้วย:
+
+```powershell
+fly apps open --app exam-proctoring-webapp
+```
+
+ดูสถานะและ log ของเซิร์ฟเวอร์ได้ด้วย `fly status --app exam-proctoring-webapp` และ `fly logs --app exam-proctoring-webapp`
 
 ให้เปิดหน้าต่างนี้ค้างไว้ขณะใช้งานระบบสอบ
 

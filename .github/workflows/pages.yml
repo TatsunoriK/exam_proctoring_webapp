@@ -30,7 +30,7 @@ jobs:
         working-directory: frontend
         env:
           VITE_BASE_PATH: /exam_proctoring_webapp/
-          VITE_API_ORIGIN: http://127.0.0.1:8000
+          VITE_API_ORIGIN: https://exam-proctoring-webapp.fly.dev
       - uses: actions/upload-pages-artifact@v3
         with:
           path: backend/static
