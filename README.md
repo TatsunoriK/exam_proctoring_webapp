@@ -46,6 +46,48 @@ fly secrets set MONGODB_URI="<your-real-mongodb-uri>" MONGODB_DATABASE="exam_pro
 fly deploy --config .\fly.toml --dockerfile .\Dockerfile
 ```
 
+### อนุญาตให้ Fly.io เชื่อมต่อ MongoDB Atlas
+
+สำหรับใช้งานจริง ให้ใช้ Static Egress IP ของ Fly.io และอย่าใช้ `0.0.0.0/0` เพราะจะเปิดฐานข้อมูลให้ทุก IP ขั้นแรกดูรายการ Machine:
+
+```powershell
+fly machine list --app exam-proctoring-webapp
+```
+
+จากนั้นจัดสรร App-scoped Static Egress IP ให้แอปใน region `sin`:
+
+```powershell
+fly ip allocate-egress --region sin --app exam-proctoring-webapp
+```
+
+ตรวจสอบ IP ที่จัดสรรได้ด้วย:
+
+```powershell
+fly ip list --app exam-proctoring-webapp
+```
+
+คำสั่งนี้เป็น App-scoped IP จึงใช้ร่วมกันได้กับทุก Machine ใน region เดียวกัน และไม่ต้องจัดสรรแยกทีละ Machine โดยบัญชี Fly ต้องเปิด billing/เพิ่มบัตรก่อนจึงจะใช้ได้
+
+### ทางเลือกฟรีสำหรับเริ่มต้น
+
+หากยังไม่ต้องการเพิ่มบัตรใน Fly.io ให้เข้า MongoDB Atlas ที่ **Security → Database & Network Access → IP Access List → Add IP Address** แล้วเพิ่ม:
+
+```text
+0.0.0.0/0
+```
+
+กด **Confirm** และรอให้สถานะเป็น **Active** วิธีนี้ไม่เสียค่า Static Egress IP และไม่ต้องแก้คำสั่ง deploy แต่เป็นการเปิดให้ทุก IP เชื่อมต่อได้ จึงควรใช้ชั่วคราวเท่านั้น และควรลบรายการนี้เมื่อเปลี่ยนไปใช้ Static Egress IP
+
+จด IPv4 ที่คำสั่งแสดง แล้วเข้า MongoDB Atlas ไปที่ **Security → Database & Network Access → IP Access List → Add IP Address** เพิ่ม IPv4 ของ Fly ทุกตัว จากนั้นกด **Confirm** และรอให้สถานะเป็น **Active**
+
+หลังเพิ่ม IP ครบแล้ว ให้ deploy หรือ restart ใหม่:
+
+```powershell
+fly deploy --config .\fly.toml --dockerfile .\Dockerfile
+```
+
+Atlas จะอนุญาตเฉพาะ IP หรือ CIDR ที่อยู่ใน Project IP Access List เท่านั้น ดูรายละเอียดได้จาก [MongoDB Atlas IP Access List documentation](https://www.mongodb.com/docs/atlas/security/add-ip-address-to-list/)
+
 คำสั่ง `fly deploy` จะใช้ [fly.toml](fly.toml) และ [Dockerfile](Dockerfile) ในโฟลเดอร์ปัจจุบันเพื่อ build และ deploy แอป หากยังไม่มีแอปชื่อนี้ ให้สร้างก่อนด้วย:
 
 ```powershell
@@ -59,6 +101,36 @@ fly apps open --app exam-proctoring-webapp
 ```
 
 ดูสถานะและ log ของเซิร์ฟเวอร์ได้ด้วย `fly status --app exam-proctoring-webapp` และ `fly logs --app exam-proctoring-webapp`
+
+### เริ่ม Fly Machine หลังหยุดอัตโนมัติ
+
+ในไฟล์ `fly.toml` ตั้งค่า `auto_start_machines = true` ไว้แล้ว ดังนั้นการเปิดเว็บจะปลุก Machine อัตโนมัติ แต่อาจใช้เวลาประมาณ 30–60 วินาทีในครั้งแรก:
+
+```text
+https://exam-proctoring-webapp.fly.dev/
+```
+
+หากต้องการเริ่มด้วยคำสั่ง PowerShell ให้ดูรายการ Machine ก่อน แล้วสั่ง start ด้วย ID ที่มีสถานะ `stopped`:
+
+```powershell
+fly machine list --app exam-proctoring-webapp
+fly machine start <MACHINE_ID> --app exam-proctoring-webapp
+fly status --app exam-proctoring-webapp
+```
+
+หากมี 2 Machines และต้องการเริ่มทั้งคู่ ให้รันคำสั่ง `fly machine start` แยกตาม ID ที่แสดงในรายการ คำว่า `<MACHINE_ID>` เป็นตัวแทนเท่านั้น ห้ามพิมพ์เครื่องหมาย `< >` ลงใน PowerShell เช่น:
+
+```powershell
+fly machine start d8d0d74b019228 --app exam-proctoring-webapp
+```
+
+ถ้าโควตา Free Trial หมดแล้ว การ start จะไม่สำเร็จ ต้องเพิ่มวิธีชำระเงิน/เปิด billing ก่อน และการหยุด Machine ไม่ได้คืนโควตาที่ใช้ไป
+
+### ข้อจำกัด Fly.io Free Trial
+
+บัญชี Fly.io ใหม่เป็น **Free Trial** ไม่ใช่ free tier ถาวร โดยให้โควตารวมประมาณ **2 ชั่วโมงของ Machine runtime หรือ 7 วัน แล้วแต่ว่าอย่างใดถึงก่อน** โควตา 2 ชั่วโมงนับรวมทุก Machine ในบัญชี หากมี 2 Machines เปิดพร้อมกัน จะใช้โควตาเร็วขึ้นเป็น 2 เท่า นอกจากนี้ Trial Machine จะหยุดอัตโนมัติหลังทำงานประมาณ 5 นาทีเมื่อไม่มีการใช้งาน
+
+เมื่อใช้โควตาหมด แอปจะหยุดและจะ deploy หรือสร้าง Machine ใหม่ไม่ได้จนกว่าจะเพิ่มวิธีชำระเงิน สามารถดูโควตาที่เหลือได้ที่ **Fly.io Dashboard → Trial Status** ดูรายละเอียดได้จาก [Fly.io Free Trial](https://fly.io/docs/about/free-trial/)
 
 ให้เปิดหน้าต่างนี้ค้างไว้ขณะใช้งานระบบสอบ
 
