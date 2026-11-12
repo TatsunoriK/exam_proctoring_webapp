@@ -24,8 +24,9 @@ CFG = dict(
     yolo_backend="coco",        # "coco" = COCO (คน/มือถือ/หนังสือ/แล็ปท็อป/ทีวี/รีโมต) เสถียร
                                 # "world" = YOLO-World (เพิ่ม หูฟัง/กระดาษโน้ต/แท็บเล็ต/นาฬิกา) ต้องทดสอบเองก่อนใช้จริง
     yolo_weights={"coco": "yolov8s.pt", "world": "yolov8s-worldv2.pt"},
-    yolo_min_conf=0.20,         # เกณฑ์ต่ำสุดตอนรัน แล้วกรองซ้ำรายคลาสด้วย obj_conf
-    obj_conf=dict(person=0.40, phone=0.25, tablet=0.30, book=0.30, paper=0.30,
+    yolo_imgsz=960,
+    yolo_min_conf=0.12,         # Keep lower-score detections for per-class filtering below.
+    obj_conf=dict(person=0.40, phone=0.15, tablet=0.30, book=0.30, paper=0.30,
                   earphone=0.25, watch=0.30, laptop=0.40, tv=0.45, remote=0.35),
     window_sec=3.0,
     base=dict(yaw=0.18, mar=0.25),
@@ -164,7 +165,7 @@ def detect_objects(frame, face_box=None):
         if c != "person": out[f"{c}_n"] = 0
         out[f"{c}_conf"] = 0.0
     dets = []
-    kw = dict(conf=CFG["yolo_min_conf"], verbose=False)
+    kw = dict(conf=CFG["yolo_min_conf"], imgsz=CFG["yolo_imgsz"], verbose=False)
     if YOLO_CLASS_IDS is not None: kw["classes"] = YOLO_CLASS_IDS
     r = YOLO_MODEL.predict(frame, **kw)[0]
     for b in r.boxes:

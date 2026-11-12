@@ -75,10 +75,17 @@ def analyze_video(data: bytes, suffix: str) -> dict:
                 result = predict(PredictRequest(features=extracted["features"]))
                 analyzed += 1
                 label = result["prediction"]
-                if label in ("suspicious", "cheating"):
-                    flags.append({"time_s": round(timestamp, 2), "label": label,
-                                  "confidence": result["probabilities"][label],
-                                  "observations": extracted.get("observations", [])})
+                observations = extracted.get("observations", [])
+                # Object detection is an independent observation.  The current
+                # classifier was trained with phone features, but those features
+                # have zero importance, so a detected phone must still surface
+                # as a review flag even when the classifier says "normal".
+                phone_detected = "object_phone" in observations
+                if label in ("suspicious", "cheating") or phone_detected:
+                    review_label = label if label in ("suspicious", "cheating") else "suspicious"
+                    flags.append({"time_s": round(timestamp, 2), "label": review_label,
+                                  "confidence": result["probabilities"].get(review_label, 0.0),
+                                  "observations": observations})
     except (av.FFmpegError, IndexError, OSError, ValueError) as exc:
         raise HTTPException(status_code=422, detail="Video cannot be decoded") from exc
     if not analyzed:

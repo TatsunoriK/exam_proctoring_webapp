@@ -98,7 +98,8 @@ def extract_frame(request: FrameRequest) -> dict[str, Any]:
             _face_extractor = extractor.FaceExtractor()
         if extractor.YOLO_MODEL is None:
             extractor.YOLO_MODEL = extractor.YOLO(str(paths[2]))
-        frame = extractor._resize(frame, 640)
+        # Preserve more detail so small objects such as a phone remain visible to YOLO.
+        frame = extractor._resize(frame, 960)
         record = _face_extractor(frame)
         face_box = [record[f"face_{k}"] for k in ("x1", "y1", "x2", "y2")] if record["n_faces"] else None
         record.update(extractor.detect_objects(frame, face_box))
@@ -200,7 +201,13 @@ def predict(request: PredictRequest) -> dict[str, Any]:
     X, imputed_count = validate_features(request.features)
     prediction = str(model.predict(X)[0])
     probabilities_raw = model.predict_proba(X)[0]
-    classes = model[-1].classes_
+    # A Pipeline exposes classes_ on its final estimator, while the updated
+    # bundle stores a RandomForestClassifier directly.  Reading model[-1] from
+    # a forest inspects only its last tree, whose bootstrap sample may omit a
+    # class and produce an incomplete probability map.
+    classes = getattr(model, "classes_", None)
+    if classes is None:
+        classes = model[-1].classes_
     probabilities = {str(label): float(prob) for label, prob in zip(classes, probabilities_raw)}
     return {"prediction": prediction, "probabilities": probabilities,
             "provided_feature_count": len(FEATURE_COLS) - imputed_count,

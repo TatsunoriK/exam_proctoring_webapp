@@ -34,6 +34,25 @@ class ClipAnalysisTest(unittest.TestCase):
         self.assertTrue(all(flag["observations"] == ["object_phone"] for flag in result["review_flags"]))
         self.assertEqual([flag["time_s"] for flag in result["review_flags"]], [0.0, 1.0])
 
+    def test_phone_observation_is_review_flag_even_when_classifier_is_normal(self):
+        output = io.BytesIO()
+        with av.open(output, "w", format="webm") as container:
+            stream = container.add_stream("libvpx", rate=5)
+            stream.width = 64
+            stream.height = 64
+            stream.pix_fmt = "yuv420p"
+            frame = av.VideoFrame.from_ndarray(np.zeros((64, 64, 3), dtype=np.uint8), format="rgb24")
+            for packet in stream.encode(frame):
+                container.mux(packet)
+            for packet in stream.encode():
+                container.mux(packet)
+        with patch("app.main.extract_frame", return_value={"features": {}, "observations": ["object_phone"]}), patch(
+            "app.main.predict", return_value={"prediction": "normal", "probabilities": {"normal": 0.9, "suspicious": 0.1}}
+        ):
+            result = analyze_video(output.getvalue(), ".webm")
+        self.assertEqual(result["review_flags"][0]["label"], "suspicious")
+        self.assertEqual(result["review_flags"][0]["observations"], ["object_phone"])
+
 
 if __name__ == "__main__":
     unittest.main()
